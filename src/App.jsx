@@ -1753,19 +1753,41 @@ export default function App() {
           }
 
           const userId = await getCurrentUserId();
-          const payload = newItems.map((item) => ({
-            comanda_id: selectedComanda.id,
-            product_id: item.productId,
-            name: item.name,
-            quantity: item.quantity,
-            price: item.price,
-            user_id: userId,
-          }));
 
-          const { error } = await supabase.from("comanda_items").insert(payload);
-          if (error) {
-            notify("Erro ao salvar itens da comanda.", "warn");
-            return;
+          for (const item of newItems) {
+            const existingItem = (selectedComanda.items || []).find(
+              (current) => String(current.productId) === String(item.productId)
+            );
+
+            if (existingItem) {
+              const { error } = await supabase
+                .from("comanda_items")
+                .update({
+                  quantity: Number(existingItem.quantity || 0) + Number(item.quantity || 0),
+                })
+                .eq("id", existingItem.id);
+
+              if (error) {
+                notify("Erro ao atualizar item da comanda.", "warn");
+                return;
+              }
+
+              continue;
+            }
+
+            const { error } = await supabase.from("comanda_items").insert({
+              comanda_id: selectedComanda.id,
+              product_id: item.productId,
+              name: item.name,
+              quantity: item.quantity,
+              price: item.price,
+              user_id: userId,
+            });
+
+            if (error) {
+              notify("Erro ao salvar itens da comanda.", "warn");
+              return;
+            }
           }
 
           await loadPersistedData();
