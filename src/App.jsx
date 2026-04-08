@@ -774,6 +774,45 @@ export default function App() {
     return data.user.id;
   }
 
+  async function getCashSummaryRecord(userIdParam) {
+    const userId = userIdParam || (await getCurrentUserId());
+    if (!userId) return null;
+
+    const { data, error } = await supabase
+      .from("cash_summary")
+      .select("id, user_id, total_closed, cash_open, session_started_at")
+      .eq("user_id", userId)
+      .order("id", { ascending: true })
+      .limit(1)
+      .maybeSingle();
+
+    if (error) return null;
+    return data || null;
+  }
+
+  async function persistCashSummaryRecord({ sessionStartedAt, closedLaunchTotal, isOpen, userId: userIdParam }) {
+    const userId = userIdParam || (await getCurrentUserId());
+    if (!userId) return false;
+
+    const payload = {
+      user_id: userId,
+      total_closed: Number(closedLaunchTotal || 0),
+      cash_open: Boolean(isOpen),
+      session_started_at: sessionStartedAt ? new Date(Number(sessionStartedAt)).toISOString() : null,
+      updated_at: new Date().toISOString(),
+    };
+
+    const existing = await getCashSummaryRecord(userId);
+
+    if (existing?.id) {
+      const { error } = await supabase.from("cash_summary").update(payload).eq("id", existing.id);
+      return !error;
+    }
+
+    const { error } = await supabase.from("cash_summary").insert(payload);
+    return !error;
+  }
+
   async function restoreSession() {
     const { data } = await supabase.auth.getSession();
     if (data?.session?.user) {
@@ -1076,16 +1115,37 @@ export default function App() {
     setCashEntries(combinedCashEntries);
 
     const storedCashSummary = readCashSummaryState();
+    const dbCashSummary = await getCashSummaryRecord(userId);
     const restoredCashOpen =
-      typeof storedCashSummary.isOpen === "boolean" ? storedCashSummary.isOpen : true;
-    setCashOpen(restoredCashOpen);
-    setCashSessionStartedAt(
-      restoredCashOpen
-        ? storedCashSummary.sessionStartedAt ??
-            combinedCashEntries[combinedCashEntries.length - 1]?.rawDate ??
-            Date.now()
-        : null
+      typeof dbCashSummary?.cash_open === "boolean"
+        ? dbCashSummary.cash_open
+        : typeof storedCashSummary.isOpen === "boolean"
+          ? storedCashSummary.isOpen
+          : true;
+    const restoredSessionStartedAt = restoredCashOpen
+      ? dbCashSummary?.session_started_at
+        ? new Date(dbCashSummary.session_started_at).getTime()
+        : storedCashSummary.sessionStartedAt ??
+          combinedCashEntries[combinedCashEntries.length - 1]?.rawDate ??
+          Date.now()
+      : null;
+    const restoredClosedLaunchTotal = Number(
+      dbCashSummary?.total_closed ?? storedCashSummary.closedLaunchTotal ?? 0
     );
+
+    setCashOpen(restoredCashOpen);
+    setCashSessionStartedAt(restoredSessionStartedAt);
+    setCashClosedLaunchTotal(restoredClosedLaunchTotal);
+    setCashSummaryHydrated(true);
+
+    if (!dbCashSummary) {
+      await persistCashSummaryRecord({
+        userId,
+        sessionStartedAt: restoredSessionStartedAt,
+        closedLaunchTotal: restoredClosedLaunchTotal,
+        isOpen: restoredCashOpen,
+      });
+    }
 
     setCash2Entries(
       (cash2Res.data || []).map((e) => ({
@@ -2336,16 +2396,27 @@ export default function App() {
       title: cashOpen ? "Fechar caixa" : "Abrir caixa",
       message: cashOpen ? "Você está encerrando o caixa atual." : "Você está abrindo um novo caixa.",
       requirePassword: true,
-      onConfirm: () => {
+      onConfirm: async () => {
         if (cashOpen) {
           const nextClosedTotal = Number(cashClosedLaunchTotal || 0) + Number(totalCashToday || 0);
           setCashClosedLaunchTotal(nextClosedTotal);
           setCashSessionStartedAt(null);
           setCashOpen(false);
+          await persistCashSummaryRecord({
+            sessionStartedAt: null,
+            closedLaunchTotal: nextClosedTotal,
+            isOpen: false,
+          });
           notify("Caixa fechado.", "success");
         } else {
-          setCashSessionStartedAt(Date.now());
+          const nextSessionStartedAt = Date.now();
+          setCashSessionStartedAt(nextSessionStartedAt);
           setCashOpen(true);
+          await persistCashSummaryRecord({
+            sessionStartedAt: nextSessionStartedAt,
+            closedLaunchTotal: Number(cashClosedLaunchTotal || 0),
+            isOpen: true,
+          });
           notify("Caixa aberto.", "success");
         }
         markMenuChanged(["caixa", "dashboard"]);
