@@ -24,6 +24,8 @@ import {
   Wallet,
   Gamepad2,
   LogOut,
+  LoaderCircle,
+  X,
 } from "lucide-react";
 import { supabase } from "./lib/supabase";
 
@@ -58,15 +60,12 @@ const formatDateTime = (value = new Date().toISOString()) => {
   }).format(date);
 };
 
+const cleanCustomerName = (value = "") => String(value || "").trim().replace(/\s+/g, " ");
 const normalizeCustomerName = (value = "") =>
-  String(value || "")
+  cleanCustomerName(value)
+    .toLowerCase()
     .normalize("NFD")
-    .replace(/[̀-ͯ]/g, "")
-    .replace(/\s+/g, " ")
-    .trim()
-    .toLocaleLowerCase("pt-BR");
-
-const cleanCustomerName = (value = "") => String(value || "").replace(/\s+/g, " ").trim();
+    .replace(/[\u0300-\u036f]/g, "");
 
 function mergeItemsByProduct(items) {
   const map = new Map();
@@ -94,6 +93,8 @@ function ActionButton({
   variant = "dark",
   type = "button",
   disabled = false,
+  loading = false,
+  loadingText = "Processando...",
 }) {
   const styles = {
     dark: "bg-slate-900 text-white hover:bg-slate-800",
@@ -110,11 +111,18 @@ function ActionButton({
   return (
     <button
       type={type}
-      disabled={disabled}
+      disabled={disabled || loading}
       onClick={onClick}
-      className={`rounded-2xl px-4 py-2 font-semibold transition-all duration-300 hover:-translate-y-[1px] hover:shadow-md active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:translate-y-0 disabled:hover:shadow-none ${styles[variant]}`}
+      className={`inline-flex items-center justify-center gap-2 rounded-2xl px-4 py-2 font-semibold transition-all duration-300 hover:-translate-y-[1px] hover:shadow-md active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:translate-y-0 disabled:hover:shadow-none ${styles[variant]}`}
     >
-      {children}
+      {loading ? (
+        <>
+          <LoaderCircle size={16} className="animate-spin" />
+          <span>{loadingText}</span>
+        </>
+      ) : (
+        children
+      )}
     </button>
   );
 }
@@ -174,6 +182,8 @@ export default function App() {
   const [auth, setAuth] = useState({ isAuthenticated: false, user: null });
   const [loginForm, setLoginForm] = useState({ user: "", password: "" });
   const [loginLoading, setLoginLoading] = useState(false);
+  const [loginError, setLoginError] = useState("");
+  const [actionLoading, setActionLoading] = useState("");
 
   const [activePage, setActivePage] = useState("dashboard");
   const [menuAlerts, setMenuAlerts] = useState({
@@ -198,8 +208,9 @@ export default function App() {
   const [fiados, setFiados] = useState([]);
   const [fiadosQuitados, setFiadosQuitados] = useState([]);
 
-  const [mesa1, setMesa1] = useState({ total: 0, paid: 0, pending: 0, open: false });
-  const [mesa2, setMesa2] = useState({ total: 0, paid: 0, pending: 0, open: false });
+  const defaultMesaState = { total: 0, paid: 0, paidValue: 0, pending: 0, unpaidTokens: 0, unpaidValue: 0, overdueTokens: 0, overdueValue: 0, overduePaidTokens: 0, overduePaidValue: 0, open: false };
+  const [mesa1, setMesa1] = useState(defaultMesaState);
+  const [mesa2, setMesa2] = useState(defaultMesaState);
   const [mesaHistory, setMesaHistory] = useState([]);
   const [mesaFilterDays, setMesaFilterDays] = useState("7");
 
@@ -226,6 +237,8 @@ export default function App() {
 
   const [closeForm, setCloseForm] = useState(emptyCloseForm);
   const fiadoMesaStorageKey = "bar_fiado_mesa_map";
+  const mesaExtraStorageKey = "bar_mesa_extra_state_v16";
+  const cashSummaryStorageKey = "bar_cash_summary_v17";
 
   const readFiadoMesaMap = () => {
     try {
@@ -241,16 +254,36 @@ export default function App() {
     } catch {}
   };
 
+  const readMesaExtraState = () => {
+    try {
+      return JSON.parse(localStorage.getItem(mesaExtraStorageKey) || "{}");
+    } catch {
+      return {};
+    }
+  };
+
+  const saveMesaExtraState = (nextState) => {
+    try {
+      localStorage.setItem(mesaExtraStorageKey, JSON.stringify(nextState || {}));
+    } catch {}
+  };
+
+  const readCashSummaryState = () => {
+    try {
+      return JSON.parse(localStorage.getItem(cashSummaryStorageKey) || "{}");
+    } catch {
+      return {};
+    }
+  };
+
+  const saveCashSummaryState = (nextState) => {
+    try {
+      localStorage.setItem(cashSummaryStorageKey, JSON.stringify(nextState || {}));
+    } catch {}
+  };
+
   const [cashOpen, setCashOpen] = useState(true);
-  const [cashSessionStart, setCashSessionStart] = useState(() => {
-    const saved = localStorage.getItem("bar_cash_session_start");
-    return saved ? Number(saved) : Date.now();
-  });
   const [cashEntries, setCashEntries] = useState([]);
-  const [closedCashLaunchTotal, setClosedCashLaunchTotal] = useState(() => {
-    const saved = localStorage.getItem("bar_closed_cash_launch_total");
-    return saved ? Number(saved) : 0;
-  });
   const [cash2Entries, setCash2Entries] = useState([]);
   const [cash2Form, setCash2Form] = useState({
     type: "Entrada",
@@ -273,16 +306,20 @@ export default function App() {
 
   const [cashFilterDays, setCashFilterDays] = useState("7");
   const [reportDateTime, setReportDateTime] = useState("");
+  const [cashSessionStartedAt, setCashSessionStartedAt] = useState(null);
+  const [cashClosedLaunchTotal, setCashClosedLaunchTotal] = useState(0);
+  const [cashSummaryHydrated, setCashSummaryHydrated] = useState(false);
   const [partialInputs, setPartialInputs] = useState({});
   const [mesaTokenInputs, setMesaTokenInputs] = useState({ mesa1: 1, mesa2: 1 });
 
-  const [toast, setToast] = useState({ type: "info", text: "" });
+  const [toast, setToast] = useState({ id: 0, type: "info", text: "" });
   const [confirmModal, setConfirmModal] = useState({
     open: false,
     type: "info",
     title: "",
     message: "",
     onConfirm: null,
+    onCancel: null,
     requirePassword: false,
     password: "",
   });
@@ -293,6 +330,16 @@ export default function App() {
     () => products.filter((p) => Number(p.stock || 0) > 0),
     [products]
   );
+
+  const fiadoDisplayName = (fiado) => {
+    const baseName = fiado?.customer || "Cliente";
+    return (fiado?.status || "") === "Fiado vencido" ? `${baseName} • Fiado em atraso por conter fichas fiadas vencidas` : baseName;
+  };
+
+  const getCashLaunchValue = (entry) => {
+    if (!entry) return 0;
+    return entry.entryType === "sale" ? Number(entry.total || 0) : 0;
+  };
 
   const filteredProducts = useMemo(() => {
     const term = productSearch.trim().toLowerCase();
@@ -364,21 +411,17 @@ export default function App() {
   );
 
   const totalCashToday = useMemo(() => {
-    if (!cashOpen) return 0;
-
+    if (!cashSessionStartedAt) return 0;
     return cashEntries.reduce((sum, item) => {
-      const total = Number(item.total || 0);
-      if (total <= 0) return sum;
-      if ((item.rawDate || 0) < Number(cashSessionStart || 0)) return sum;
-      if (item.entryType !== "sale") return sum;
-      return sum + total;
+      const entryTs = Number(item.rawDate || 0);
+      if (!entryTs || entryTs < cashSessionStartedAt) return sum;
+      return sum + getCashLaunchValue(item);
     }, 0);
-  }, [cashEntries, cashOpen, cashSessionStart]);
+  }, [cashEntries, cashSessionStartedAt]);
 
-  const totalGeneralEntries = useMemo(
-    () => Number(closedCashLaunchTotal || 0),
-    [closedCashLaunchTotal]
-  );
+  const totalAllLaunches = useMemo(() => {
+    return Number(cashClosedLaunchTotal || 0);
+  }, [cashClosedLaunchTotal]);
 
   const lowStockProducts = useMemo(
     () => products.filter((item) => Number(item.stock || 0) <= 10),
@@ -440,64 +483,6 @@ export default function App() {
     );
   }, [mesaHistory, mesaFilterDays]);
 
-  const isMesaLinkedFiado = (item, mesaName) => {
-    if (!item || item.tableName !== mesaName) return false;
-
-    const pendingTokens = Number(item.pendingTokens || 0);
-    if (pendingTokens <= 0) return false;
-
-    return true;
-  };
-
-  const mesaPendingFiadoStats = useMemo(() => ({
-    mesa1: fiados.reduce(
-      (acc, item) => {
-        if (!isMesaLinkedFiado(item, "Mesa 1")) return acc;
-        const pendingTokens = Number(item.pendingTokens || 0);
-        acc.tokens += pendingTokens;
-        acc.total += pendingTokens * fichaPrice;
-        return acc;
-      },
-      { tokens: 0, total: 0 }
-    ),
-    mesa2: fiados.reduce(
-      (acc, item) => {
-        if (!isMesaLinkedFiado(item, "Mesa 2")) return acc;
-        const pendingTokens = Number(item.pendingTokens || 0);
-        acc.tokens += pendingTokens;
-        acc.total += pendingTokens * fichaPrice;
-        return acc;
-      },
-      { tokens: 0, total: 0 }
-    ),
-  }), [fiados, fichaPrice]);
-
-  const fiadoCustomerOptions = useMemo(() => {
-    const seen = new Set();
-
-    return [...fiados, ...fiadosQuitados].reduce((acc, fiado) => {
-      const name = cleanCustomerName(fiado.customer);
-      const normalized = normalizeCustomerName(name);
-      if (!name || seen.has(normalized)) return acc;
-      seen.add(normalized);
-      acc.push(name);
-      return acc;
-    }, []);
-  }, [fiados, fiadosQuitados]);
-
-  const loanCustomerOptions = useMemo(() => {
-    const seen = new Set();
-
-    return loans.reduce((acc, loan) => {
-      const name = cleanCustomerName(loan.customer);
-      const normalized = normalizeCustomerName(name);
-      if (!name || seen.has(normalized)) return acc;
-      seen.add(normalized);
-      acc.push(name);
-      return acc;
-    }, []);
-  }, [loans]);
-
   const tabs = [
     { key: "dashboard", label: "Início", color: "bg-amber-500", icon: CircleDollarSign },
     { key: "comandas", label: "Comandas", color: "bg-sky-600", icon: ClipboardList },
@@ -523,10 +508,57 @@ export default function App() {
   const ConfirmIcon = confirmModal.type === "warn" ? AlertTriangle : Info;
 
   function notify(text, type = "info") {
-    setToast({ text, type });
+    const id = Date.now();
+    setToast({ id, text, type });
     setTimeout(() => {
-      setToast((prev) => (prev.text === text ? { ...prev, text: "" } : prev));
-    }, 3200);
+      setToast((prev) => (prev.id === id ? { ...prev, text: "" } : prev));
+    }, 3400);
+  }
+
+  async function runActionWithLoading(key, action) {
+    if (actionLoading === key) return;
+    setActionLoading(key);
+    try {
+      return await Promise.resolve(action());
+    } finally {
+      setActionLoading((prev) => (prev === key ? "" : prev));
+    }
+  }
+
+  function renderToast() {
+    if (!toast.text) return null;
+
+    return (
+      <div className="pointer-events-none fixed right-4 top-4 z-[70] w-[calc(100%-2rem)] max-w-sm">
+        <div className={`overflow-hidden rounded-3xl shadow-2xl ring-1 backdrop-blur ${toastStyles[toast.type || "info"]}`}>
+          <div className="flex items-start gap-3 p-4">
+            <div className="mt-0.5 rounded-2xl bg-white/70 p-2">
+              {toast.type === "success" ? (
+                <CheckCircle2 size={18} className="shrink-0" />
+              ) : toast.type === "warn" ? (
+                <AlertTriangle size={18} className="shrink-0" />
+              ) : (
+                <Info size={18} className="shrink-0" />
+              )}
+            </div>
+            <div className="min-w-0 flex-1">
+              <p className="text-sm font-semibold">{toast.type === "success" ? "Sucesso" : toast.type === "warn" ? "Atenção" : "Aviso"}</p>
+              <p className="mt-1 text-sm leading-6">{toast.text}</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setToast((prev) => ({ ...prev, text: "" }))}
+              className="pointer-events-auto rounded-2xl p-1 opacity-70 transition hover:bg-white/60 hover:opacity-100"
+            >
+              <X size={16} />
+            </button>
+          </div>
+          <div className="h-1 w-full bg-black/5">
+            <div key={toast.id} className="h-full animate-[shrink_3.4s_linear_forwards] bg-current/30" />
+          </div>
+        </div>
+      </div>
+    );
   }
 
   function markMenuChanged(keys) {
@@ -546,15 +578,28 @@ export default function App() {
     setConfirmModal({ open: true, password: "", ...config });
   }
 
-  function closeConfirm() {
+  function closeConfirm(triggerCancel = true) {
+    const cancelCb = confirmModal.onCancel;
     setConfirmModal({
       open: false,
       type: "info",
       title: "",
       message: "",
       onConfirm: null,
+      onCancel: null,
       requirePassword: false,
       password: "",
+    });
+    if (triggerCancel && cancelCb) cancelCb();
+  }
+
+  function askCustomConfirm(config) {
+    return new Promise((resolve) => {
+      openConfirm({
+        ...config,
+        onConfirm: () => resolve(true),
+        onCancel: () => resolve(false),
+      });
     });
   }
 
@@ -565,7 +610,7 @@ export default function App() {
     }
 
     const cb = confirmModal.onConfirm;
-    closeConfirm();
+    closeConfirm(false);
     if (cb) cb();
   }
 
@@ -575,32 +620,6 @@ export default function App() {
 
   function closeReceipt() {
     setReceiptModal({ open: false, data: null });
-  }
-
-  function buildFiadoReceiptData(fiado, statusLabel = "Pendente") {
-    return {
-      code: `FIADO-${String(fiado.id || "").slice(0, 8).toUpperCase() || "0000"}`,
-      customer: fiado.customer,
-      at: formatDateTime(),
-      paymentMethod: statusLabel,
-      amountReceived: 0,
-      troco: 0,
-      tokens: Number(fiado.pendingTokens || 0),
-      total: Number(fiado.total || fiado.pending || 0) + Number(fiado.partialPaid || 0),
-      products: mergeItemsByProduct(fiado.products || []),
-      fiadoSummary: {
-        status: statusLabel,
-        partialPaid: Number(fiado.partialPaid || 0),
-        pending: Number(fiado.pending || 0),
-        total: Number(fiado.total || fiado.pending || 0) + Number(fiado.partialPaid || 0),
-      },
-      history: (fiado.history || []).map((item) => ({
-        type: item.type,
-        method: item.method,
-        value: Number(item.value || 0),
-        at: item.at,
-      })),
-    };
   }
 
   function downloadTextFile(filename, content) {
@@ -699,36 +718,6 @@ export default function App() {
       `
         : "";
 
-    const fiadoSummaryHtml =
-      data.fiadoSummary
-        ? `
-        <div class="line"></div>
-        <h2 style="font-size:14px;margin-bottom:8px;">Resumo do fiado</h2>
-        <div class="row"><span>Status</span><strong>${data.fiadoSummary.status}</strong></div>
-        <div class="row"><span>Pago parcial</span><strong>${currency(data.fiadoSummary.partialPaid)}</strong></div>
-        <div class="row"><span>Saldo pendente</span><strong>${currency(data.fiadoSummary.pending)}</strong></div>
-      `
-        : "";
-
-    const historyHtml =
-      data.history?.length
-        ? `
-        <div class="line"></div>
-        <h2 style="font-size:14px;margin-bottom:8px;">Histórico</h2>
-        ${data.history
-          .map(
-            (item) => `
-            <div style="border:1px solid #ddd;border-radius:10px;padding:8px 10px;margin:8px 0;">
-              <div class="row"><span>${item.type}</span><strong>${currency(item.value)}</strong></div>
-              <div class="row"><span>Método</span><span>${item.method || "-"}</span></div>
-              <div class="row"><span>Data</span><span>${item.at || "-"}</span></div>
-            </div>
-          `
-          )
-          .join("")}
-      `
-        : "";
-
     const html = `
       <!DOCTYPE html>
       <html lang="pt-BR">
@@ -763,8 +752,6 @@ export default function App() {
             <div class="line"></div>
             <div class="row"><span>Pagamento</span><strong>${data.paymentMethod}</strong></div>
             ${receivedHtml}
-            ${fiadoSummaryHtml}
-            ${historyHtml}
             <div class="line"></div>
             <div class="row total"><span>Total</span><strong>${currency(data.total)}</strong></div>
           </div>
@@ -802,8 +789,9 @@ export default function App() {
   }
 
   async function handleLogin() {
+    setLoginError("");
     if (!loginForm.user.trim() || !loginForm.password.trim()) {
-      notify("Preencha usuário e senha para entrar.", "warn");
+      setLoginError("Preencha usuário e senha para entrar.");
       return;
     }
 
@@ -821,10 +809,11 @@ export default function App() {
     setLoginLoading(false);
 
     if (error) {
-      notify(error.message || "Usuário ou senha inválidos.", "warn");
+      setLoginError(error.message || "Usuário ou senha inválidos.");
       return;
     }
 
+    setLoginError("");
     setAuth({
       isAuthenticated: true,
       user: data.user
@@ -865,6 +854,31 @@ export default function App() {
       ]);
     }
   }
+
+
+  const mesaPendingFiadoStats = useMemo(() => ({
+    mesa1: fiados.reduce((acc, item) => {
+      const status = String(item.status || "").trim();
+      if (item.tableName !== "Mesa 1" || status === "Quitado" || status === "Fiado vencido") return acc;
+      const tokens = Number(item.pendingTokens || 0);
+      acc.tokens += tokens;
+      acc.total += tokens * fichaPrice;
+      return acc;
+    }, { tokens: 0, total: 0 }),
+    mesa2: fiados.reduce((acc, item) => {
+      const status = String(item.status || "").trim();
+      if (item.tableName !== "Mesa 2" || status === "Quitado" || status === "Fiado vencido") return acc;
+      const tokens = Number(item.pendingTokens || 0);
+      acc.tokens += tokens;
+      acc.total += tokens * fichaPrice;
+      return acc;
+    }, { tokens: 0, total: 0 }),
+  }), [fiados]);
+
+  const mesaOverdueStats = useMemo(() => ({
+    mesa1: { tokens: Number(mesa1.overdueTokens || 0), total: Number(mesa1.overdueValue || 0) },
+    mesa2: { tokens: Number(mesa2.overdueTokens || 0), total: Number(mesa2.overdueValue || 0) },
+  }), [mesa1.overdueTokens, mesa1.overdueValue, mesa2.overdueTokens, mesa2.overdueValue]);
 
   async function loadProducts() {
     setProductsLoading(true);
@@ -959,7 +973,6 @@ export default function App() {
     const fiadosBase = fiadosRes.data || [];
     const fiadoHistory = fiadoHistoryRes.data || [];
     const fiadoItems = fiadoItemsRes.data || [];
-    const fiadoMesaMap = readFiadoMesaMap();
 
     setFiados(
       fiadosBase
@@ -967,10 +980,11 @@ export default function App() {
         .map((f) => ({
           id: f.id,
           customer: f.customer,
+          status: f.status,
           pending: Number(f.pending || 0),
           partialPaid: Number(f.partial_paid || 0),
           pendingTokens: Number(f.pending_tokens || 0),
-          tableName: f.table_name || fiadoMesaMap[f.id] || "",
+          tableName: readFiadoMesaMap()[f.id] || "",
           products: fiadoItems
             .filter((i) => i.fiado_id === f.id)
             .map((i) => ({
@@ -997,54 +1011,80 @@ export default function App() {
         .map((f) => ({
           id: f.id,
           customer: f.customer,
+          status: f.status,
           total: Number(f.partial_paid || 0) + Number(f.pending || 0),
-          partialPaid: Number(f.partial_paid || 0),
-          pending: Number(f.pending || 0),
           pendingTokens: Number(f.pending_tokens || 0),
-          tableName: f.table_name || fiadoMesaMap[f.id] || "",
+          tableName: readFiadoMesaMap()[f.id] || "",
           at: formatDateTime(f.created_at),
-          products: fiadoItems
-            .filter((i) => i.fiado_id === f.id)
-            .map((i) => ({
-              id: i.id,
-              productId: i.product_id,
-              name: i.name,
-              quantity: Number(i.quantity || 0),
-              price: Number(i.price || 0),
-            })),
-          history: fiadoHistory
-            .filter((h) => h.fiado_id === f.id)
-            .map((h) => ({
-              type: h.type,
-              value: Number(h.value || 0),
-              method: h.method,
-              at: formatDateTime(h.created_at),
-            })),
         }))
     );
 
     const cashEntriesBase = cashEntriesRes.data || [];
     const cashItems = cashEntryItemsRes.data || [];
 
-    setCashEntries(
-      cashEntriesBase.map((e) => ({
-        id: e.id,
-        comanda: e.comanda,
-        method: e.method,
-        total: Number(e.total || 0),
-        at: formatDateTime(e.created_at),
-        rawDate: new Date(e.created_at).getTime(),
-        entryType: e.entry_type,
-        items: cashItems
-          .filter((i) => i.cash_entry_id === e.id)
-          .map((i) => ({
-            id: i.id,
-            productId: i.product_id,
-            name: i.name,
-            quantity: Number(i.quantity || 0),
-            price: Number(i.price || 0),
-          })),
-      }))
+    const baseCashEntries = cashEntriesBase.map((e) => ({
+      id: e.id,
+      comanda: e.comanda,
+      method: e.method,
+      total: Number(e.total || 0),
+      at: formatDateTime(e.created_at),
+      rawDate: new Date(e.created_at).getTime(),
+      entryType: e.entry_type,
+      description: e.description || "",
+      items: cashItems
+        .filter((i) => i.cash_entry_id === e.id)
+        .map((i) => ({
+          id: i.id,
+          productId: i.product_id,
+          name: i.name,
+          quantity: Number(i.quantity || 0),
+          price: Number(i.price || 0),
+        })),
+    }));
+
+    const loansBase = loansRes.data || [];
+    const loanHistory = loanHistoryRes.data || [];
+    const loanMap = new Map(loansBase.map((l) => [l.id, l.customer]));
+
+    const syntheticLoanHistoryEntries = loanHistory
+      .filter((h) => h.type !== "Empréstimo")
+      .map((h) => ({
+        id: `loan-history-${h.id}`,
+        comanda: `Empréstimo - ${loanMap.get(h.loan_id) || "Cliente"}`,
+        method: h.type,
+        total: Number(h.value || 0),
+        at: formatDateTime(h.created_at),
+        rawDate: new Date(h.created_at).getTime(),
+        entryType: "loan-payment",
+        description: loanMap.get(h.loan_id) || "",
+        synthetic: true,
+        items: [
+          {
+            id: `loan-history-item-${h.id}`,
+            productId: "loan-history",
+            name: h.type,
+            quantity: 1,
+            price: Number(h.value || 0),
+          },
+        ],
+      }));
+
+    const combinedCashEntries = [...baseCashEntries, ...syntheticLoanHistoryEntries].sort(
+      (a, b) => Number(b.rawDate || 0) - Number(a.rawDate || 0)
+    );
+
+    setCashEntries(combinedCashEntries);
+
+    const storedCashSummary = readCashSummaryState();
+    const restoredCashOpen =
+      typeof storedCashSummary.isOpen === "boolean" ? storedCashSummary.isOpen : true;
+    setCashOpen(restoredCashOpen);
+    setCashSessionStartedAt(
+      restoredCashOpen
+        ? storedCashSummary.sessionStartedAt ??
+            combinedCashEntries[combinedCashEntries.length - 1]?.rawDate ??
+            Date.now()
+        : null
     );
 
     setCash2Entries(
@@ -1069,9 +1109,6 @@ export default function App() {
       }))
     );
 
-    const loansBase = loansRes.data || [];
-    const loanHistory = loanHistoryRes.data || [];
-
     setLoans(
       loansBase.map((l) => ({
         id: l.id,
@@ -1095,22 +1132,39 @@ export default function App() {
     const mesas = mesasRes.data || [];
     const mesa1Db = mesas.find((m) => m.name === "Mesa 1");
     const mesa2Db = mesas.find((m) => m.name === "Mesa 2");
+    const mesaExtras = readMesaExtraState();
 
     if (mesa1Db) {
+      const extra = mesaExtras["Mesa 1"] || {};
       setMesa1({
-        total: mesa1Db.total,
-        paid: mesa1Db.paid,
-        pending: mesa1Db.pending,
-        open: mesa1Db.open,
+        total: Number(mesa1Db.total || 0),
+        paid: Number(mesa1Db.paid || 0),
+        paidValue: Number(extra.paidValue || (Number(mesa1Db.paid || 0) * fichaPrice)),
+        pending: Number(mesa1Db.pending || 0),
+        unpaidTokens: Number(extra.unpaidTokens || 0),
+        unpaidValue: Number(extra.unpaidValue || 0),
+        overdueTokens: Number(extra.overdueTokens || 0),
+        overdueValue: Number(extra.overdueValue || 0),
+        overduePaidTokens: Number(extra.overduePaidTokens || 0),
+        overduePaidValue: Number(extra.overduePaidValue || 0),
+        open: !!mesa1Db.open,
       });
     }
 
     if (mesa2Db) {
+      const extra = mesaExtras["Mesa 2"] || {};
       setMesa2({
-        total: mesa2Db.total,
-        paid: mesa2Db.paid,
-        pending: mesa2Db.pending,
-        open: mesa2Db.open,
+        total: Number(mesa2Db.total || 0),
+        paid: Number(mesa2Db.paid || 0),
+        paidValue: Number(extra.paidValue || (Number(mesa2Db.paid || 0) * fichaPrice)),
+        pending: Number(mesa2Db.pending || 0),
+        unpaidTokens: Number(extra.unpaidTokens || 0),
+        unpaidValue: Number(extra.unpaidValue || 0),
+        overdueTokens: Number(extra.overdueTokens || 0),
+        overdueValue: Number(extra.overdueValue || 0),
+        overduePaidTokens: Number(extra.overduePaidTokens || 0),
+        overduePaidValue: Number(extra.overduePaidValue || 0),
+        open: !!mesa2Db.open,
       });
     }
 
@@ -1134,6 +1188,21 @@ export default function App() {
   async function persistMesa(name, nextState) {
     const userId = await getCurrentUserId();
     if (!userId) return;
+
+    const extras = readMesaExtraState();
+    saveMesaExtraState({
+      ...extras,
+      [name]: {
+        paidValue: Number(nextState.paidValue || 0),
+        unpaidTokens: Number(nextState.unpaidTokens || 0),
+        unpaidValue: Number(nextState.unpaidValue || 0),
+        overdueTokens: Number(nextState.overdueTokens || 0),
+        overdueValue: Number(nextState.overdueValue || 0),
+        overduePaidTokens: Number(nextState.overduePaidTokens || 0),
+        overduePaidValue: Number(nextState.overduePaidValue || 0),
+      },
+    });
+
     await supabase
       .from("mesas")
       .update({
@@ -1247,183 +1316,121 @@ export default function App() {
     const userId = await getCurrentUserId();
     const cleanedCustomer = cleanCustomerName(customer);
     const normalizedCustomer = normalizeCustomerName(cleanedCustomer);
-    const normalizedPendingTokens = Math.max(0, Number(pendingTokens || 0));
-    const normalizedPending = Math.max(0, Number(pending || 0));
-    const normalizedTableName =
-      normalizedPendingTokens > 0 && ["Mesa 1", "Mesa 2"].includes(tableName) ? tableName : null;
-
-    if (!cleanedCustomer) {
-      throw new Error("Informe o nome do cliente do fiado.");
-    }
 
     const { data: existingFiados, error: existingFiadosError } = await supabase
       .from("fiados")
       .select("id, customer, pending, partial_paid, pending_tokens, status")
       .eq("user_id", userId)
-      .eq("status", "Pendente");
+      .neq("status", "Quitado");
 
     if (existingFiadosError) throw existingFiadosError;
 
-    const existingFiado = (existingFiados || []).find(
-      (item) => normalizeCustomerName(item.customer) === normalizedCustomer
-    );
+    const existingFiado = (existingFiados || []).find((item) => normalizeCustomerName(item.customer) === normalizedCustomer);
 
     if (existingFiado) {
-      const nextPending = Number(existingFiado.pending || 0) + normalizedPending;
-      const nextPendingTokens = Number(existingFiado.pending_tokens || 0) + normalizedPendingTokens;
+      const confirmMerge = await askCustomConfirm({
+        type: "warn",
+        title: "Fiado já existente",
+        message: `${cleanedCustomer} já possui fiado em aberto. Deseja lançar o novo valor no mesmo cliente?`,
+      });
+      if (!confirmMerge) return { cancelled: true };
 
-      const { error: updateFiadoError } = await supabase
+      const nextPending = Number(existingFiado.pending || 0) + Number(pending || 0);
+      const nextTokens = Number(existingFiado.pending_tokens || 0) + Number(pendingTokens || 0);
+      const nextStatus = existingFiado.status === "Fiado vencido" ? "Fiado vencido" : "Pendente";
+
+      const { data: updated, error: updateError } = await supabase
         .from("fiados")
         .update({
-          customer: cleanCustomerName(existingFiado.customer || cleanedCustomer),
+          customer: cleanedCustomer,
           pending: nextPending,
-          pending_tokens: nextPendingTokens,
-          status: "Pendente",
+          partial_paid: Number(existingFiado.partial_paid || 0),
+          pending_tokens: nextTokens,
+          status: nextStatus,
         })
-        .eq("id", existingFiado.id);
+        .eq("id", existingFiado.id)
+        .select()
+        .single();
 
-      if (updateFiadoError) throw updateFiadoError;
+      if (updateError) throw updateError;
 
-      if (existingFiado.id && normalizedTableName) {
-        const currentFiadoMesaMap = readFiadoMesaMap();
-        saveFiadoMesaMap({
-          ...currentFiadoMesaMap,
-          [existingFiado.id]: normalizedTableName,
-        });
+      const currentMap = readFiadoMesaMap();
+      if (tableName && ["Mesa 1", "Mesa 2"].includes(tableName)) {
+        saveFiadoMesaMap({ ...currentMap, [existingFiado.id]: tableName });
       }
 
-      const { error: historyError } = await supabase.from("fiado_history").insert({
+      await supabase.from("fiado_history").insert({
         fiado_id: existingFiado.id,
-        type: "Acréscimo",
-        value: normalizedPending,
+        type: "acréscimo",
+        value: pending,
         method: "Fiado",
         user_id: userId,
       });
 
-      if (historyError) throw historyError;
-
-      const fiadoItemPayload = (products || [])
-        .filter((item) => item && Number(item.quantity || 0) > 0)
-        .map((item) => {
-          const rawProductId = String(item.productId || "").trim();
-          const hasRealProductId = rawProductId && !rawProductId.includes("ficha");
-          return {
-            fiado_id: existingFiado.id,
-            product_id: hasRealProductId ? rawProductId : null,
-            name: item.name,
-            quantity: Number(item.quantity || 0),
-            price: Number(item.price || 0),
-            user_id: userId,
-          };
-        });
-
-      if (fiadoItemPayload.length) {
-        let fiadoItemsError = null;
-
-        const firstAttempt = await supabase.from("fiado_items").insert(fiadoItemPayload);
-        fiadoItemsError = firstAttempt.error || null;
-
-        if (fiadoItemsError) {
-          const fallbackPayload = fiadoItemPayload.map(({ product_id, ...rest }) => rest);
-          const fallbackAttempt = await supabase.from("fiado_items").insert(fallbackPayload);
-          fiadoItemsError = fallbackAttempt.error || null;
-        }
-
-        if (fiadoItemsError) throw fiadoItemsError;
-      }
-
-      return {
-        id: existingFiado.id,
-        customer: cleanCustomerName(existingFiado.customer || cleanedCustomer),
-      };
-    }
-
-    const baseFiadoPayload = {
-      customer: cleanedCustomer,
-      pending: normalizedPending,
-      partial_paid: 0,
-      pending_tokens: normalizedPendingTokens,
-      status: "Pendente",
-      user_id: userId,
-    };
-
-    let data = null;
-    let error = null;
-
-    const firstInsert = await supabase
-      .from("fiados")
-      .insert({
-        ...baseFiadoPayload,
-        table_name: normalizedTableName,
-      })
-      .select()
-      .single();
-
-    data = firstInsert.data || null;
-    error = firstInsert.error || null;
-
-    if (error && String(error.message || "").toLowerCase().includes("table_name")) {
-      const fallbackInsert = await supabase
-        .from("fiados")
-        .insert(baseFiadoPayload)
-        .select()
-        .single();
-
-      data = fallbackInsert.data || null;
-      error = fallbackInsert.error || null;
-    }
-
-    if (error) throw error;
-
-    if (data?.id && normalizedTableName) {
-      const currentFiadoMesaMap = readFiadoMesaMap();
-      saveFiadoMesaMap({
-        ...currentFiadoMesaMap,
-        [data.id]: normalizedTableName,
-      });
-    }
-
-    const { error: historyError } = await supabase.from("fiado_history").insert({
-      fiado_id: data.id,
-      type: "Abertura",
-      value: normalizedPending,
-      method: "Fiado",
-      user_id: userId,
-    });
-
-    if (historyError) throw historyError;
-
-    const fiadoItemPayload = (products || [])
-      .filter((item) => item && Number(item.quantity || 0) > 0)
-      .map((item) => {
-        const rawProductId = String(item.productId || "").trim();
-        const hasRealProductId = rawProductId && !rawProductId.includes("ficha");
-        return {
-          fiado_id: data.id,
-          product_id: hasRealProductId ? rawProductId : null,
+      if (products.length) {
+        const mappedProducts = products.map((item) => ({
+          fiado_id: existingFiado.id,
+          product_id: item.productId || null,
           name: item.name,
           quantity: Number(item.quantity || 0),
           price: Number(item.price || 0),
           user_id: userId,
-        };
-      });
+        }));
 
-    if (fiadoItemPayload.length) {
-      let fiadoItemsError = null;
-
-      const firstAttempt = await supabase.from("fiado_items").insert(fiadoItemPayload);
-      fiadoItemsError = firstAttempt.error || null;
-
-      if (fiadoItemsError) {
-        const fallbackPayload = fiadoItemPayload.map(({ product_id, ...rest }) => rest);
-        const fallbackAttempt = await supabase.from("fiado_items").insert(fallbackPayload);
-        fiadoItemsError = fallbackAttempt.error || null;
+        const { error: insertItemsError } = await supabase.from("fiado_items").insert(mappedProducts);
+        if (insertItemsError) {
+          const fallbackProducts = mappedProducts.map(({ product_id, ...rest }) => rest);
+          const { error: fallbackError } = await supabase.from("fiado_items").insert(fallbackProducts);
+          if (fallbackError) throw fallbackError;
+        }
       }
 
-      if (fiadoItemsError) {
-        await supabase.from("fiado_history").delete().eq("fiado_id", data.id);
-        await supabase.from("fiados").delete().eq("id", data.id);
-        throw fiadoItemsError;
+      return updated;
+    }
+
+    const { data, error } = await supabase
+      .from("fiados")
+      .insert({
+        customer: cleanedCustomer,
+        pending,
+        partial_paid: 0,
+        pending_tokens: pendingTokens,
+        status: "Pendente",
+        user_id: userId,
+      })
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    const currentMap = readFiadoMesaMap();
+    if (tableName && ["Mesa 1", "Mesa 2"].includes(tableName)) {
+      saveFiadoMesaMap({ ...currentMap, [data.id]: tableName });
+    }
+
+    await supabase.from("fiado_history").insert({
+      fiado_id: data.id,
+      type: "abertura",
+      value: pending,
+      method: "Fiado",
+      user_id: userId,
+    });
+
+    if (products.length) {
+      const mappedProducts = products.map((item) => ({
+        fiado_id: data.id,
+        product_id: item.productId || null,
+        name: item.name,
+        quantity: Number(item.quantity || 0),
+        price: Number(item.price || 0),
+        user_id: userId,
+      }));
+
+      const { error: insertItemsError } = await supabase.from("fiado_items").insert(mappedProducts);
+      if (insertItemsError) {
+        const fallbackProducts = mappedProducts.map(({ product_id, ...rest }) => rest);
+        const { error: fallbackError } = await supabase.from("fiado_items").insert(fallbackProducts);
+        if (fallbackError) throw fallbackError;
       }
     }
 
@@ -1651,9 +1658,8 @@ export default function App() {
       title: "Excluir comanda",
       message: `Deseja realmente excluir a comanda ${selectedComanda.code} de ${selectedComanda.customer}?`,
       onConfirm: async () => {
-        try {
-          await deleteComandaAndItems(selectedComanda.id);
-        } catch {
+        const { error } = await supabase.from("comandas").delete().eq("id", selectedComanda.id);
+        if (error) {
           notify("Erro ao excluir comanda.", "warn");
           return;
         }
@@ -1778,109 +1784,14 @@ export default function App() {
     });
   }
 
-  async function transferTableTokensToFiado(tableName, tokenQuantity) {
-    if (!tableName || tableName === "Nenhuma" || !tokenQuantity) return;
-
-    if (tableName === "Mesa 1") {
-      const next = {
-        total: mesa1.total,
-        paid: Number(mesa1.paid || 0),
-        pending: Math.max(0, Number(mesa1.pending || 0) - tokenQuantity),
-        open: Math.max(0, Number(mesa1.pending || 0) - tokenQuantity) > 0,
-      };
-      setMesa1(next);
-      await persistMesa("Mesa 1", next);
-      await addMesaHistoryEntry({
-        mesa: "Mesa 1",
-        action: "Fichas enviadas para fiado",
-        total: next.total,
-        paid: next.paid,
-        pending: next.pending,
-        tokenQuantity,
-        value: tokenQuantity * fichaPrice,
-        details: `${tokenQuantity} ficha(s) movida(s) para fiado pendente.`,
-      });
-      return;
-    }
-
-    if (tableName === "Mesa 2") {
-      const next = {
-        total: mesa2.total,
-        paid: Number(mesa2.paid || 0),
-        pending: Math.max(0, Number(mesa2.pending || 0) - tokenQuantity),
-        open: Math.max(0, Number(mesa2.pending || 0) - tokenQuantity) > 0,
-      };
-      setMesa2(next);
-      await persistMesa("Mesa 2", next);
-      await addMesaHistoryEntry({
-        mesa: "Mesa 2",
-        action: "Fichas enviadas para fiado",
-        total: next.total,
-        paid: next.paid,
-        pending: next.pending,
-        tokenQuantity,
-        value: tokenQuantity * fichaPrice,
-        details: `${tokenQuantity} ficha(s) movida(s) para fiado pendente.`,
-      });
-      return;
-    }
-  }
-
-  async function applyFiadoTokensToMesa(tableName, tokenQuantity) {
-    if (!tableName || tableName === "Nenhuma" || !tokenQuantity) return;
-
-    if (tableName === "Mesa 1") {
-      const next = {
-        total: mesa1.total,
-        paid: Number(mesa1.paid || 0) + tokenQuantity,
-        pending: Number(mesa1.pending || 0),
-        open: Number(mesa1.pending || 0) > 0,
-      };
-      setMesa1(next);
-      await persistMesa("Mesa 1", next);
-      await addMesaHistoryEntry({
-        mesa: "Mesa 1",
-        action: "Fichas do fiado quitadas",
-        total: next.total,
-        paid: next.paid,
-        pending: next.pending,
-        tokenQuantity,
-        value: tokenQuantity * fichaPrice,
-        details: `${tokenQuantity} ficha(s) do fiado foram pagas.`,
-      });
-      return;
-    }
-
-    if (tableName === "Mesa 2") {
-      const next = {
-        total: mesa2.total,
-        paid: Number(mesa2.paid || 0) + tokenQuantity,
-        pending: Number(mesa2.pending || 0),
-        open: Number(mesa2.pending || 0) > 0,
-      };
-      setMesa2(next);
-      await persistMesa("Mesa 2", next);
-      await addMesaHistoryEntry({
-        mesa: "Mesa 2",
-        action: "Fichas do fiado quitadas",
-        total: next.total,
-        paid: next.paid,
-        pending: next.pending,
-        tokenQuantity,
-        value: tokenQuantity * fichaPrice,
-        details: `${tokenQuantity} ficha(s) do fiado foram pagas.`,
-      });
-      return;
-    }
-  }
-
   async function applyTablePayment(table, tokenQuantity) {
     if (!tokenQuantity || table === "Nenhuma") return;
 
     if (table === "Mesa 1") {
       const next = {
-        total: mesa1.total,
+        ...mesa1,
         paid: Number(mesa1.paid || 0) + tokenQuantity,
+        paidValue: Number(mesa1.paidValue || (Number(mesa1.paid || 0) * fichaPrice)) + tokenQuantity * fichaPrice,
         pending: Math.max(0, Number(mesa1.pending || 0) - tokenQuantity),
         open: Math.max(0, Number(mesa1.pending || 0) - tokenQuantity) > 0,
       };
@@ -1900,8 +1811,9 @@ export default function App() {
 
     if (table === "Mesa 2") {
       const next = {
-        total: mesa2.total,
+        ...mesa2,
         paid: Number(mesa2.paid || 0) + tokenQuantity,
+        paidValue: Number(mesa2.paidValue || (Number(mesa2.paid || 0) * fichaPrice)) + tokenQuantity * fichaPrice,
         pending: Math.max(0, Number(mesa2.pending || 0) - tokenQuantity),
         open: Math.max(0, Number(mesa2.pending || 0) - tokenQuantity) > 0,
       };
@@ -1920,6 +1832,67 @@ export default function App() {
     }
   }
 
+  async function moveTableTokensToFiado(table, tokenQuantity) {
+    if (!tokenQuantity || table === "Nenhuma") return;
+
+    const current = table === "Mesa 1" ? mesa1 : mesa2;
+    const nextPending = Math.max(0, Number(current.pending || 0) - Number(tokenQuantity || 0));
+    const next = {
+      ...current,
+      pending: nextPending,
+      open: nextPending > 0,
+    };
+
+    if (table === "Mesa 1") setMesa1(next);
+    else setMesa2(next);
+
+    await persistMesa(table, next);
+    await addMesaHistoryEntry({
+      mesa: table,
+      action: "Fichas lançadas em fiado",
+      total: next.total,
+      paid: next.paid,
+      pending: next.pending,
+      tokenQuantity,
+      value: Number(tokenQuantity || 0) * fichaPrice,
+      details: `${tokenQuantity} ficha(s) saiu(ram) das pendências da mesa e foi(ram) lançada(s) em fiado. O valor só entra em fichas pagas quando o fiado for quitado.`,
+    });
+  }
+
+  async function applyDirectTokenPaymentToMesa(table, tokenQuantity) {
+    if (!tokenQuantity || table === "Nenhuma") return;
+
+    const current = table === "Mesa 1" ? mesa1 : mesa2;
+    const paidTokens = Math.min(Number(tokenQuantity || 0), Number(current.pending || 0));
+
+    if (paidTokens <= 0) return;
+
+    const paidValue = paidTokens * fichaPrice;
+    const nextPending = Math.max(0, Number(current.pending || 0) - paidTokens);
+    const next = {
+      ...current,
+      pending: nextPending,
+      paid: Number(current.paid || 0) + paidTokens,
+      paidValue: Number(current.paidValue || (Number(current.paid || 0) * fichaPrice)) + paidValue,
+      open: nextPending > 0,
+    };
+
+    if (table === "Mesa 1") setMesa1(next);
+    else setMesa2(next);
+
+    await persistMesa(table, next);
+    await addMesaHistoryEntry({
+      mesa: table,
+      action: "Pagamento direto de fichas na comanda",
+      total: next.total,
+      paid: next.paid,
+      pending: next.pending,
+      tokenQuantity: paidTokens,
+      value: paidValue,
+      details: `${paidTokens} ficha(s) foi(ram) paga(s) diretamente no fechamento da comanda.`,
+    });
+  }
+
   function addMesaTokens(tableKey) {
     const qty = Math.max(1, Number(mesaTokenInputs[tableKey] || 1));
 
@@ -1932,8 +1905,10 @@ export default function App() {
         const mesaNome = tableKey === "mesa1" ? "Mesa 1" : "Mesa 2";
         const mesaAtual = tableKey === "mesa1" ? mesa1 : mesa2;
         const next = {
+          ...mesaAtual,
           total: Number(mesaAtual.total || 0) + qty,
           paid: Number(mesaAtual.paid || 0),
+          paidValue: Number(mesaAtual.paidValue || (Number(mesaAtual.paid || 0) * fichaPrice)),
           pending: Number(mesaAtual.pending || 0) + qty,
           open: true,
         };
@@ -1963,16 +1938,194 @@ export default function App() {
     });
   }
 
+  function getMesaLinkedFiadoStats(table) {
+    const map = readFiadoMesaMap();
+    return fiados.reduce(
+      (acc, item) => {
+        if (map[item.id] !== table || item.status === "Quitado") return acc;
+        const tokens = Number(item.pendingTokens || 0);
+        if (tokens <= 0) return acc;
+        acc.tokens += tokens;
+        acc.value += tokens * fichaPrice;
+        return acc;
+      },
+      { tokens: 0, value: 0 }
+    );
+  }
+
+  async function markMesaFiadosAsOverdue(table) {
+    const userId = await getCurrentUserId();
+    const map = readFiadoMesaMap();
+    const linked = fiados.filter((item) => map[item.id] === table && Number(item.pendingTokens || 0) > 0 && item.status !== "Quitado");
+    for (const item of linked) {
+      await supabase.from("fiados").update({ status: "Fiado vencido" }).eq("id", item.id).eq("user_id", userId);
+    }
+    return linked.reduce((acc, item) => {
+      acc.tokens += Number(item.pendingTokens || 0);
+      acc.value += Number(item.pendingTokens || 0) * fichaPrice;
+      return acc;
+    }, { tokens: 0, value: 0 });
+  }
+
+  async function applyFiadoTokenPaymentToMesa(table, fiado, paymentValue, settleAll = false) {
+    if (!table || !fiado) return;
+
+    const current = table === "Mesa 1" ? mesa1 : mesa2;
+    const currentPendingTokens = Math.max(0, Number(fiado.pendingTokens || 0));
+    if (currentPendingTokens <= 0) return;
+
+    const currentPendingValue = Math.max(0, currentPendingTokens * fichaPrice);
+    const rawTokenValuePaid = settleAll ? currentPendingValue : Math.min(Number(paymentValue || 0), currentPendingValue);
+    let paidTokens = settleAll ? currentPendingTokens : Math.floor(rawTokenValuePaid / fichaPrice);
+
+    if (paidTokens <= 0 && rawTokenValuePaid > 0 && Number(paymentValue || 0) >= currentPendingValue) {
+      paidTokens = currentPendingTokens;
+    }
+
+    if (paidTokens <= 0) return;
+
+    const paidValue = paidTokens * fichaPrice;
+    const isOverdueFiado = fiado.status === "Fiado vencido";
+    const next = {
+      ...current,
+      total: isOverdueFiado ? Number(current.total || 0) + paidTokens : Number(current.total || 0),
+      paid: Number(current.paid || 0) + paidTokens,
+      paidValue: Number(current.paidValue || (Number(current.paid || 0) * fichaPrice)) + paidValue,
+      overdueTokens: isOverdueFiado
+        ? Math.max(0, Number(current.overdueTokens || 0) - paidTokens)
+        : Number(current.overdueTokens || 0),
+      overdueValue: isOverdueFiado
+        ? Math.max(0, Number(current.overdueValue || 0) - paidValue)
+        : Number(current.overdueValue || 0),
+      overduePaidTokens: isOverdueFiado
+        ? Number(current.overduePaidTokens || 0) + paidTokens
+        : Number(current.overduePaidTokens || 0),
+      overduePaidValue: isOverdueFiado
+        ? Number(current.overduePaidValue || 0) + paidValue
+        : Number(current.overduePaidValue || 0),
+      open: false,
+    };
+
+    if (table === "Mesa 1") setMesa1(next);
+    else setMesa2(next);
+
+    await persistMesa(table, next);
+
+    const nextPendingTokens = Math.max(0, currentPendingTokens - paidTokens);
+    const nextStatus = Number(fiado.pending || 0) - Number(paymentValue || 0) <= 0
+      ? "Quitado"
+      : fiado.status === "Fiado vencido"
+        ? "Fiado vencido"
+        : "Pendente";
+
+    await supabase
+      .from("fiados")
+      .update({
+        pending_tokens: nextPendingTokens,
+        status: nextStatus,
+      })
+      .eq("id", fiado.id);
+  }
+
+  async function quitMesa(table) {
+    const state = table === "Mesa 1" ? mesa1 : mesa2;
+    if (!state.total && !state.pending && !state.paid && !state.unpaidTokens && !state.overdueTokens) {
+      notify(`${table} já está zerada.`, "info");
+      return;
+    }
+
+    openConfirm({
+      type: "warn",
+      title: `Quitar ${table}`,
+      message: state.pending > 0
+        ? `${table} vai encerrar as fichas pendentes sem pagamento. Essas fichas sairão de pendentes e entrarão em fichas não pagas.`
+        : `${table} não possui fichas pendentes no momento.`,
+      requirePassword: true,
+      onConfirm: async () => {
+        const pendingTokens = Number(state.pending || 0);
+        const pendingValue = pendingTokens * fichaPrice;
+
+        await addMesaHistoryEntry({
+          mesa: table,
+          action: pendingTokens > 0 ? "Quitação de pendências da mesa" : "Quitação da mesa sem pendências",
+          total: state.total,
+          paid: state.paid,
+          pending: pendingTokens,
+          tokenQuantity: pendingTokens,
+          value: pendingValue,
+          details:
+            pendingTokens > 0
+              ? `Mesa quitada manualmente. ${pendingTokens} ficha(s) saiu(ram) de pendentes e foi(ram) registrada(s) como não paga(s).`
+              : "Mesa quitada sem fichas pendentes.",
+        });
+
+        const next = {
+          ...state,
+          pending: 0,
+          unpaidTokens: Number(state.unpaidTokens || 0) + pendingTokens,
+          unpaidValue: Number(state.unpaidValue || 0) + pendingValue,
+          open: false,
+        };
+
+        if (table === "Mesa 1") setMesa1(next); else setMesa2(next);
+        await persistMesa(table, next);
+        notify(`${table} quitada com sucesso.`, "success");
+      },
+    });
+  }
+
+
+  function preserveCashSummarySnapshot() {
+    const stored = readCashSummaryState();
+    return {
+      sessionStartedAt: stored.sessionStartedAt ?? cashSessionStartedAt ?? null,
+      closedLaunchTotal: Number(stored.closedLaunchTotal ?? cashClosedLaunchTotal ?? 0),
+      isOpen: typeof stored.isOpen === "boolean" ? stored.isOpen : cashOpen,
+    };
+  }
+
+  function restoreCashSummarySnapshot(snapshot) {
+    if (!snapshot) return;
+    setCashSessionStartedAt(snapshot.sessionStartedAt ?? null);
+    setCashClosedLaunchTotal(Number(snapshot.closedLaunchTotal || 0));
+    if (typeof snapshot.isOpen === "boolean") {
+      setCashOpen(snapshot.isOpen);
+    }
+    saveCashSummaryState({
+      sessionStartedAt: snapshot.sessionStartedAt ?? null,
+      closedLaunchTotal: Number(snapshot.closedLaunchTotal || 0),
+      isOpen: typeof snapshot.isOpen === "boolean" ? snapshot.isOpen : cashOpen,
+    });
+  }
+
   function closeMesa(table) {
     const state = table === "Mesa 1" ? mesa1 : mesa2;
+    const linkedFiadoStats = getMesaLinkedFiadoStats(table);
+
+    if (!state.total && !state.pending && !state.paid && !state.unpaidTokens && !linkedFiadoStats.tokens && !state.overdueTokens) {
+      notify(`${table} não tem nada para pagar e já está pronta para novo uso.`, "info");
+      return;
+    }
 
     if (state.pending > 0) {
+      if (linkedFiadoStats.tokens <= 0) {
+        notify(`${table} possui ${state.pending} ficha(s) pendente(s) e nenhuma delas foi lançada em fiado. Quite as fichas ou lance no fiado antes de fechar a mesa.`, "warn");
+        return;
+      }
+
+      if (linkedFiadoStats.tokens < state.pending) {
+        notify(`${table} ainda tem ${state.pending - linkedFiadoStats.tokens} ficha(s) pendente(s) fora do fiado. Lance todas no fiado ou quite tudo antes de fechar a mesa.`, "warn");
+        return;
+      }
+
       openConfirm({
         type: "warn",
         title: `Fechar ${table} com pendência`,
-        message: `${table} possui ${state.pending} ficha(s) pendente(s). Se essas fichas ficaram no fiado, você pode forçar o fechamento da mesa mesmo assim.`,
+        message: `${table} possui ${state.pending} ficha(s) pendente(s), todas já vinculadas ao fiado. Ao fechar a mesa, essas fichas passarão para fiado vencido.`,
         requirePassword: true,
         onConfirm: async () => {
+          const cashSummarySnapshot = preserveCashSummarySnapshot();
+          const overdue = await markMesaFiadosAsOverdue(table);
           await addMesaHistoryEntry({
             mesa: table,
             action: "Fechamento forçado",
@@ -1981,10 +2134,10 @@ export default function App() {
             pending: state.pending,
             tokenQuantity: state.pending,
             value: state.pending * fichaPrice,
-            details: "Mesa encerrada com fichas pendentes.",
+            details: `Mesa encerrada com fichas pendentes. Fiado vencido transferido: ${overdue.tokens} ficha(s).`,
           });
 
-          const cleared = { total: 0, paid: 0, pending: 0, open: false };
+          const cleared = { ...defaultMesaState, overdueTokens: Number(state.overdueTokens || 0) + overdue.tokens, overdueValue: Number(state.overdueValue || 0) + overdue.value, paidValue: 0 };
 
           if (table === "Mesa 1") {
             setMesa1(cleared);
@@ -1994,6 +2147,7 @@ export default function App() {
             await persistMesa("Mesa 2", cleared);
           }
 
+          restoreCashSummarySnapshot(cashSummarySnapshot);
           notify(`${table} foi encerrada com fechamento forçado.`, "warn");
           markMenuChanged(["sinuca", "dashboard"]);
         },
@@ -2007,6 +2161,10 @@ export default function App() {
       message: `${table} será zerada e ficará pronta para novo uso.`,
       requirePassword: true,
       onConfirm: async () => {
+        const cashSummarySnapshot = preserveCashSummarySnapshot();
+        const overdue = linkedFiadoStats.tokens > 0
+          ? await markMesaFiadosAsOverdue(table)
+          : { tokens: 0, value: 0 };
         await addMesaHistoryEntry({
           mesa: table,
           action: "Fechamento normal",
@@ -2015,10 +2173,10 @@ export default function App() {
           pending: state.pending,
           tokenQuantity: 0,
           value: 0,
-          details: "Mesa encerrada sem pendências.",
+          details: overdue.tokens > 0 ? `Mesa encerrada. Fiado vencido transferido: ${overdue.tokens} ficha(s).` : "Mesa encerrada sem pendências.",
         });
 
-        const cleared = { total: 0, paid: 0, pending: 0, open: false };
+        const cleared = { ...defaultMesaState, overdueTokens: Number(state.overdueTokens || 0) + overdue.tokens, overdueValue: Number(state.overdueValue || 0) + overdue.value, paidValue: 0 };
 
         if (table === "Mesa 1") {
           setMesa1(cleared);
@@ -2028,6 +2186,7 @@ export default function App() {
           await persistMesa("Mesa 2", cleared);
         }
 
+        restoreCashSummarySnapshot(cashSummarySnapshot);
         notify(`${table} zerada com sucesso.`, "success");
         markMenuChanged(["sinuca", "dashboard"]);
       },
@@ -2047,7 +2206,11 @@ export default function App() {
 
     const nextPending = Math.max(0, Number(fiado.pending || 0) - value);
     const nextPartialPaid = Number(fiado.partialPaid || 0) + value;
-    const nextStatus = nextPending === 0 ? "Quitado" : "Pendente";
+    const nextStatus = nextPending === 0 ? "Quitado" : fiado.status === "Fiado vencido" ? "Fiado vencido" : "Pendente";
+    const currentPendingTokens = Math.max(0, Number(fiado.pendingTokens || 0));
+    const tokenValuePaid = Math.min(value, currentPendingTokens * fichaPrice);
+    const paidTokens = nextPending === 0 ? currentPendingTokens : Math.min(currentPendingTokens, Math.floor(tokenValuePaid / fichaPrice));
+    const nextPendingTokens = Math.max(0, currentPendingTokens - paidTokens);
     const userId = await getCurrentUserId();
 
     const { error } = await supabase
@@ -2055,6 +2218,7 @@ export default function App() {
       .update({
         pending: nextPending,
         partial_paid: nextPartialPaid,
+        pending_tokens: nextPendingTokens,
         status: nextStatus,
       })
       .eq("id", fiadoId);
@@ -2073,13 +2237,17 @@ export default function App() {
     });
 
     await saveCashEntryWithItems({
-      comanda: `Fiado - ${fiado.customer}`,
+      comanda: `Fiado - ${fiadoDisplayName(fiado)}`,
       method: "Pagamento parcial fiado",
       total: value,
       entryType: "sale",
       items: [],
       description: fiado.customer,
     });
+
+    if (fiado.tableName && paidTokens > 0) {
+      await applyFiadoTokenPaymentToMesa(fiado.tableName, fiado, value, nextPending === 0);
+    }
 
     setPartialInputs((prev) => ({ ...prev, [fiadoId]: "" }));
     await loadPersistedData();
@@ -2091,15 +2259,17 @@ export default function App() {
     openConfirm({
       type: "info",
       title: "Quitar fiado",
-      message: `Você vai quitar totalmente o fiado de ${fiado.customer}.`,
+      message: `Você vai quitar totalmente o fiado de ${fiadoDisplayName(fiado)}.`,
       onConfirm: async () => {
         const pending = Number(fiado.pending || 0);
+        const pendingTokens = Number(fiado.pendingTokens || 0);
 
         const { error } = await supabase
           .from("fiados")
           .update({
             pending: 0,
             partial_paid: Number(fiado.partialPaid || 0) + pending,
+            pending_tokens: 0,
             status: "Quitado",
           })
           .eq("id", fiado.id);
@@ -2118,12 +2288,8 @@ export default function App() {
           user_id: userId,
         });
 
-        if (Number(fiado.pendingTokens || 0) > 0 && fiado.tableName) {
-          await applyFiadoTokensToMesa(fiado.tableName, Number(fiado.pendingTokens || 0));
-        }
-
         await saveCashEntryWithItems({
-          comanda: `Fiado - ${fiado.customer}`,
+          comanda: `Fiado - ${fiadoDisplayName(fiado)}`,
           method: "Quitação total",
           total: pending,
           entryType: "sale",
@@ -2131,8 +2297,12 @@ export default function App() {
           description: fiado.customer,
         });
 
+        if (fiado.tableName && pendingTokens > 0) {
+          await applyFiadoTokenPaymentToMesa(fiado.tableName, fiado, pending, true);
+        }
+
         await loadPersistedData();
-        notify(`Fiado de ${fiado.customer} quitado com sucesso.`, "success");
+        notify(`Fiado de ${fiadoDisplayName(fiado)} quitado com sucesso.`, "success");
         markMenuChanged(["fiados", "dashboard", "caixa"]);
       },
     });
@@ -2146,20 +2316,14 @@ export default function App() {
       requirePassword: true,
       onConfirm: () => {
         if (cashOpen) {
-          const updatedClosedTotal = Number(closedCashLaunchTotal || 0) + Number(totalCashToday || 0);
-          setClosedCashLaunchTotal(updatedClosedTotal);
-          localStorage.setItem("bar_closed_cash_launch_total", String(updatedClosedTotal));
+          const nextClosedTotal = Number(cashClosedLaunchTotal || 0) + Number(totalCashToday || 0);
+          setCashClosedLaunchTotal(nextClosedTotal);
+          setCashSessionStartedAt(null);
           setCashOpen(false);
-          setCashSessionStart(null);
-          localStorage.setItem("bar_cash_open", "false");
-          localStorage.removeItem("bar_cash_session_start");
           notify("Caixa fechado.", "success");
         } else {
-          const now = Date.now();
+          setCashSessionStartedAt(Date.now());
           setCashOpen(true);
-          setCashSessionStart(now);
-          localStorage.setItem("bar_cash_open", "true");
-          localStorage.setItem("bar_cash_session_start", String(now));
           notify("Caixa aberto.", "success");
         }
         markMenuChanged(["caixa", "dashboard"]);
@@ -2231,13 +2395,14 @@ export default function App() {
           await updateStockAndSales(quickSaleItems);
 
           if (quickSale.paymentMethod === "Fiado") {
-            await saveFiadoWithItems({
+            const fiadoResult = await saveFiadoWithItems({
               customer: quickSale.fiadoCustomer.trim(),
               pending: quickSaleTotal,
               pendingTokens: 0,
               tableName: "",
               products: mergeItemsByProduct(quickSaleItems),
             });
+            if (fiadoResult?.cancelled) return;
           } else {
             await saveCashEntryWithItems({
               comanda: "Venda rápida",
@@ -2275,19 +2440,11 @@ export default function App() {
           await loadPersistedData();
           notify("Venda concluída com sucesso.", "success");
           markMenuChanged(["dashboard", "caixa", "fiados", "relatorios"]);
-        } catch (error) {
-          notify(`Erro ao concluir venda rápida fiado${error?.message ? `: ${error.message}` : "."}`, "warn");
+        } catch {
+          notify("Erro ao concluir venda rápida.", "warn");
         }
       },
     });
-  }
-
-  async function deleteComandaAndItems(comandaId) {
-    const { error: itemsError } = await supabase.from("comanda_items").delete().eq("comanda_id", comandaId);
-    if (itemsError) throw itemsError;
-
-    const { error: comandaError } = await supabase.from("comandas").delete().eq("id", comandaId);
-    if (comandaError) throw comandaError;
   }
 
   function closeSelectedComanda() {
@@ -2298,19 +2455,19 @@ export default function App() {
 
     const total = selectedProductsTotal + validatedTokenQuantity * fichaPrice;
 
+    if (closeForm.table !== "Nenhuma" && Number(selectedTableState?.pending || 0) > 0 && validatedTokenQuantity <= 0) {
+      notify(`A ${closeForm.table} possui fichas pendentes. Informe quantas fichas serão aplicadas nesta comanda ou deixe a mesa sem vínculo no pagamento.`, "warn");
+      return;
+    }
+
     if (total <= 0) {
       openConfirm({
         type: "info",
         title: "Apagar comanda zerada",
         message: `A ${selectedComanda.code} não possui valores pendentes e será apagada.`,
         onConfirm: async () => {
-          try {
-            await deleteComandaAndItems(selectedComanda.id);
-            await loadPersistedData();
-          } catch {
-            notify("Erro ao remover comanda.", "warn");
-            return;
-          }
+          await supabase.from("comandas").delete().eq("id", selectedComanda.id);
+          await loadPersistedData();
           setSelectedComandaId("");
           setCloseForm(emptyCloseForm);
           notify(`Comanda ${selectedComanda.code} removida.`, "success");
@@ -2349,27 +2506,22 @@ export default function App() {
           const productItems = mergeItemsByProduct(selectedComanda.items || []);
           await updateStockAndSales(productItems);
 
-          if (validatedTokenQuantity > 0 && closeForm.paymentMethod !== "Fiado") {
-            await applyTablePayment(closeForm.table, validatedTokenQuantity);
-          }
-
           if (closeForm.paymentMethod === "Fiado") {
-            const fiadoProducts = mergeItemsByProduct(productItems).filter(
-              (item) => item && (item.productId || item.name) && Number(item.quantity || 0) > 0
-            );
-
             await saveFiadoWithItems({
               customer: closeForm.fiadoCustomer.trim(),
               pending: total,
               pendingTokens: validatedTokenQuantity,
               tableName: closeForm.table,
-              products: fiadoProducts,
+              products: productItems,
             });
 
-            if (validatedTokenQuantity > 0 && closeForm.table !== "Nenhuma") {
-              await transferTableTokensToFiado(closeForm.table, validatedTokenQuantity);
+            if (validatedTokenQuantity > 0) {
+              await moveTableTokensToFiado(closeForm.table, validatedTokenQuantity);
             }
           } else {
+            if (validatedTokenQuantity > 0) {
+              await applyDirectTokenPaymentToMesa(closeForm.table, validatedTokenQuantity);
+            }
             const paymentLabel =
               closeForm.paymentMethod === "Dividir"
                 ? `Dividido em ${Math.max(1, Number(closeForm.splitPeople) || 1)} pessoa(s)`
@@ -2417,7 +2569,7 @@ export default function App() {
             at: formatDateTime(),
           });
 
-          await deleteComandaAndItems(selectedComanda.id);
+          await supabase.from("comandas").delete().eq("id", selectedComanda.id);
           await loadPersistedData();
 
           setCloseForm(emptyCloseForm);
@@ -2425,8 +2577,8 @@ export default function App() {
 
           notify(`Comanda ${selectedComanda.code} encerrada com sucesso.`, "success");
           markMenuChanged(["dashboard", "caixa", "fiados", "relatorios", "comandas", "sinuca"]);
-        } catch (error) {
-          notify(`Erro ao fechar comanda${error?.message ? `: ${error.message}` : "."}`, "warn");
+        } catch {
+          notify("Erro ao fechar comanda.", "warn");
         }
       },
     });
@@ -2446,7 +2598,7 @@ export default function App() {
     }
 
     if (cash2Form.type === "Saída" && value > Number(cash2Balance || 0)) {
-      notify("Saldo insuficiente no Caixa 2 para essa saída.", "warn");
+      notify("O Caixa 2 não pode ficar negativo.", "warn");
       return;
     }
 
@@ -2473,6 +2625,36 @@ export default function App() {
         setCash2Form({ type: "Entrada", description: "", value: "" });
         await loadPersistedData();
         notify("Lançamento registrado no Caixa 2.", "success");
+        markMenuChanged(["caixa", "dashboard"]);
+      },
+    });
+  }
+
+
+  function removeCash2Entry(entryId) {
+    if (!cashOpen) {
+      notify("Com o caixa fechado, não é possível editar o Caixa 2.", "warn");
+      return;
+    }
+
+    const entry = cash2Entries.find((item) => item.id === entryId);
+    if (!entry) return;
+
+    openConfirm({
+      type: "warn",
+      title: "Excluir lançamento do Caixa 2",
+      message: `Deseja remover o lançamento de ${currency(entry.value)} do Caixa 2?`,
+      requirePassword: true,
+      onConfirm: async () => {
+        const { error } = await supabase.from("cash2_entries").delete().eq("id", entryId);
+
+        if (error) {
+          notify("Erro ao remover lançamento do Caixa 2.", "warn");
+          return;
+        }
+
+        await loadPersistedData();
+        notify("Lançamento removido do Caixa 2.", "success");
         markMenuChanged(["caixa", "dashboard"]);
       },
     });
@@ -2550,9 +2732,8 @@ export default function App() {
     }
 
     const value = Number(loanForm.value || 0);
-    const cleanedCustomer = cleanCustomerName(loanForm.customer);
 
-    if (!cleanedCustomer) {
+    if (!loanForm.customer.trim()) {
       notify("Informe o nome do cliente.", "warn");
       return;
     }
@@ -2570,10 +2751,11 @@ export default function App() {
     openConfirm({
       type: "info",
       title: "Registrar empréstimo",
-      message: `Você vai registrar um empréstimo de ${currency(value)} para ${cleanedCustomer}.`,
+      message: `Você vai registrar um empréstimo de ${currency(value)} para ${loanForm.customer}.`,
       requirePassword: true,
       onConfirm: async () => {
         const userId = await getCurrentUserId();
+        const cleanedCustomer = cleanCustomerName(loanForm.customer);
         const normalizedCustomer = normalizeCustomerName(cleanedCustomer);
 
         const { data: existingLoans, error: existingLoansError } = await supabase
@@ -2587,17 +2769,21 @@ export default function App() {
           return;
         }
 
-        const existingLoan = (existingLoans || []).find(
-          (item) => normalizeCustomerName(item.customer) === normalizedCustomer
-        );
-
+        const existingLoan = (existingLoans || []).find((item) => normalizeCustomerName(item.customer) === normalizedCustomer);
         let loanDb = null;
 
         if (existingLoan) {
-          const { data: updatedLoan, error: loanUpdateError } = await supabase
+          const confirmMerge = await askCustomConfirm({
+            type: "warn",
+            title: "Empréstimo já existente",
+            message: `${cleanedCustomer} já possui empréstimo pendente. Deseja lançar este valor no mesmo cliente?`,
+          });
+          if (!confirmMerge) return;
+
+          const { data: updatedLoan, error: loanError } = await supabase
             .from("loans")
             .update({
-              customer: cleanCustomerName(existingLoan.customer || cleanedCustomer),
+              customer: cleanedCustomer,
               original_value: Number(existingLoan.original_value || 0) + value,
               pending: Number(existingLoan.pending || 0) + value,
               status: "Pendente",
@@ -2606,21 +2792,13 @@ export default function App() {
             .select()
             .single();
 
-          if (loanUpdateError) {
-            notify("Erro ao atualizar empréstimo.", "warn");
+          if (loanError) {
+            notify("Erro ao salvar empréstimo.", "warn");
             return;
           }
-
           loanDb = updatedLoan;
-
-          await supabase.from("loan_history").insert({
-            loan_id: loanDb.id,
-            type: "Acréscimo empréstimo",
-            value,
-            user_id: userId,
-          });
         } else {
-          const { data: createdLoan, error: loanError } = await supabase
+          const { data: insertedLoan, error: loanError } = await supabase
             .from("loans")
             .insert({
               customer: cleanedCustomer,
@@ -2637,16 +2815,15 @@ export default function App() {
             notify("Erro ao salvar empréstimo.", "warn");
             return;
           }
-
-          loanDb = createdLoan;
-
-          await supabase.from("loan_history").insert({
-            loan_id: loanDb.id,
-            type: "Empréstimo",
-            value,
-            user_id: userId,
-          });
+          loanDb = insertedLoan;
         }
+
+        await supabase.from("loan_history").insert({
+          loan_id: loanDb.id,
+          type: "Empréstimo",
+          value,
+          user_id: userId,
+        });
 
         await saveCashEntryWithItems({
           comanda: `Empréstimo - ${loanDb.customer}`,
@@ -2666,12 +2843,7 @@ export default function App() {
 
         setLoanForm({ customer: "", value: "" });
         await loadPersistedData();
-        notify(
-          existingLoan
-            ? "Valor acrescentado ao empréstimo existente do cliente."
-            : "Empréstimo registrado com sucesso.",
-          "success"
-        );
+        notify("Empréstimo registrado com sucesso.", "success");
         markMenuChanged(["movimentos", "caixa", "dashboard"]);
       },
     });
@@ -2690,7 +2862,7 @@ export default function App() {
 
     const nextPending = Math.max(0, Number(loan.pending || 0) - value);
     const nextPaid = Number(loan.paid || 0) + value;
-    const nextStatus = nextPending === 0 ? "Quitado" : "Pendente";
+    const nextStatus = nextPending === 0 ? "Quitado" : fiado.status === "Fiado vencido" ? "Fiado vencido" : "Pendente";
     const userId = await getCurrentUserId();
 
     const { error: loanUpdateError } = await supabase
@@ -2712,22 +2884,6 @@ export default function App() {
       type: "Pagamento parcial",
       value,
       user_id: userId,
-    });
-
-    await saveCashEntryWithItems({
-      comanda: `Pagamento empréstimo - ${loan.customer}`,
-      method: "Pagamento parcial",
-      total: value,
-      entryType: "loan-payment",
-      items: [
-        {
-          productId: "pagamento-emprestimo-parcial",
-          name: `Pagamento parcial - ${loan.customer}`,
-          quantity: 1,
-          price: value,
-        },
-      ],
-      description: loan.customer,
     });
 
     setLoanPartialInputs((prev) => ({ ...prev, [loanId]: "" }));
@@ -2767,22 +2923,6 @@ export default function App() {
           user_id: userId,
         });
 
-        await saveCashEntryWithItems({
-          comanda: `Pagamento empréstimo - ${loan.customer}`,
-          method: "Quitação total",
-          total: pending,
-          entryType: "loan-payment",
-          items: [
-            {
-              productId: "pagamento-emprestimo-total",
-              name: `Quitação total - ${loan.customer}`,
-              quantity: 1,
-              price: pending,
-            },
-          ],
-          description: loan.customer,
-        });
-
         await loadPersistedData();
         notify("Empréstimo quitado com sucesso.", "success");
         markMenuChanged(["movimentos", "dashboard"]);
@@ -2791,6 +2931,11 @@ export default function App() {
   }
 
   function removeCashEntry(entry) {
+    if (entry.synthetic) {
+      notify("Esse lançamento é histórico do empréstimo e não pode ser removido por aqui.", "info");
+      return;
+    }
+
     openConfirm({
       type: "warn",
       title: "Remover lançamento",
@@ -2904,21 +3049,6 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    const savedOpen = localStorage.getItem("bar_cash_open");
-    const savedStart = localStorage.getItem("bar_cash_session_start");
-
-    if (savedOpen === "false") {
-      setCashOpen(false);
-    } else if (savedOpen === "true") {
-      setCashOpen(true);
-    }
-
-    if (savedStart) {
-      setCashSessionStart(Number(savedStart));
-    }
-  }, []);
-
-  useEffect(() => {
     if (auth.isAuthenticated) {
       (async () => {
         await ensureMesas();
@@ -2927,6 +3057,25 @@ export default function App() {
       })();
     }
   }, [auth.isAuthenticated]);
+
+  useEffect(() => {
+    const stored = readCashSummaryState();
+    if (typeof stored.isOpen === "boolean") {
+      setCashOpen(stored.isOpen);
+    }
+    setCashSessionStartedAt(stored.sessionStartedAt ?? null);
+    setCashClosedLaunchTotal(Number(stored.closedLaunchTotal ?? 0));
+    setCashSummaryHydrated(true);
+  }, []);
+
+  useEffect(() => {
+    if (!cashSummaryHydrated) return;
+    saveCashSummaryState({
+      sessionStartedAt: cashSessionStartedAt,
+      closedLaunchTotal: cashClosedLaunchTotal,
+      isOpen: cashOpen,
+    });
+  }, [cashSessionStartedAt, cashClosedLaunchTotal, cashOpen, cashSummaryHydrated]);
 
   if (!auth.isAuthenticated) {
     return (
@@ -2939,28 +3088,18 @@ export default function App() {
             <h1 className="mt-5 text-3xl font-black text-slate-900">Bar do Pereira</h1>
             <p className="mt-2 text-sm text-slate-500">Acesso ao sistema</p>
           </div>
-
-          {toast.text ? (
-            <div className={`mb-5 rounded-2xl p-4 ring-1 ${toastStyles[toast.type || "info"]}`}>
-              <div className="flex items-start gap-3">
-                {toast.type === "success" ? (
-                  <CheckCircle2 size={18} className="mt-0.5 shrink-0" />
-                ) : toast.type === "warn" ? (
-                  <AlertTriangle size={18} className="mt-0.5 shrink-0" />
-                ) : (
-                  <Info size={18} className="mt-0.5 shrink-0" />
-                )}
-                <p className="text-sm leading-6">{toast.text}</p>
-              </div>
-            </div>
-          ) : null}
-
           <div className="grid gap-4">
+            {loginError ? (
+              <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-medium text-rose-700">
+                {loginError}
+              </div>
+            ) : null}
+
             <label className="grid gap-2 text-sm font-medium text-slate-700">
               Usuário
               <input
                 value={loginForm.user}
-                onChange={(e) => setLoginForm((prev) => ({ ...prev, user: e.target.value }))}
+                onChange={(e) => { setLoginForm((prev) => ({ ...prev, user: e.target.value })); if (loginError) setLoginError(""); }}
                 onKeyDown={(e) => handleEnterAction(e, handleLogin)}
                 className="rounded-2xl border border-slate-300 bg-white px-4 py-3 outline-none focus:ring-2 focus:ring-amber-300"
                 placeholder="Usuário"
@@ -2974,7 +3113,7 @@ export default function App() {
                 <input
                   type="password"
                   value={loginForm.password}
-                  onChange={(e) => setLoginForm((prev) => ({ ...prev, password: e.target.value }))}
+                  onChange={(e) => { setLoginForm((prev) => ({ ...prev, password: e.target.value })); if (loginError) setLoginError(""); }}
                   onKeyDown={(e) => handleEnterAction(e, handleLogin)}
                   className="w-full rounded-2xl border border-slate-300 bg-white py-3 pl-11 pr-4 outline-none focus:ring-2 focus:ring-amber-300"
                   placeholder="Senha"
@@ -2982,10 +3121,10 @@ export default function App() {
               </div>
             </label>
 
-            <ActionButton onClick={handleLogin} disabled={loginLoading} variant="dark">
+            <ActionButton onClick={handleLogin} disabled={loginLoading} loading={loginLoading} loadingText="Entrando..." variant="dark">
               <span className="inline-flex items-center gap-2">
                 <LogIn size={18} />
-                {loginLoading ? "Entrando..." : "Entrar"}
+                Entrar
               </span>
             </ActionButton>
           </div>
@@ -3017,15 +3156,15 @@ export default function App() {
       <header className="sticky top-0 z-20 border-b border-slate-200 bg-slate-950 px-4 py-4 text-white shadow-sm">
         <div className="mx-auto max-w-7xl">
           <div className="flex flex-col gap-4">
-            <div className="flex items-center justify-center gap-3">
+            <div className="flex flex-wrap items-center justify-start gap-3">
               <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-amber-400 text-slate-950">
                 <Beer size={24} />
               </div>
-              <h1 className="text-center text-2xl font-black tracking-wide">Bar do Pereira</h1>
+              <h1 className="text-left text-2xl font-black tracking-wide">Bar do Pereira</h1>
             </div>
 
-            <div className="flex justify-center">
-              <nav className="flex flex-wrap justify-center gap-2">
+            <div className="flex justify-start">
+              <nav className="flex w-full flex-wrap justify-start gap-2">
                 {tabs.map((tab) => (
                   <PageTab
                     key={tab.key}
@@ -3052,20 +3191,7 @@ export default function App() {
       </header>
 
       <main className="mx-auto max-w-7xl p-4 md:p-6 xl:p-8">
-        {toast.text ? (
-          <div className={`mb-6 rounded-2xl p-4 ring-1 transition-all duration-300 ${toastStyles[toast.type || "info"]}`}>
-            <div className="flex items-start gap-3">
-              {toast.type === "success" ? (
-                <CheckCircle2 size={18} className="mt-0.5 shrink-0" />
-              ) : toast.type === "warn" ? (
-                <AlertTriangle size={18} className="mt-0.5 shrink-0" />
-              ) : (
-                <Info size={18} className="mt-0.5 shrink-0" />
-              )}
-              <p className="text-sm leading-6">{toast.text}</p>
-            </div>
-          </div>
-        ) : null}
+        {renderToast()}
 
         {activePage === "dashboard" && (
           <div className="grid gap-6">
@@ -3197,26 +3323,17 @@ export default function App() {
                     <span>Cliente do fiado</span>
                     <input
                       disabled={!cashOpen}
-                      list="fiado-customers-list"
                       value={quickSale.fiadoCustomer}
                       onChange={(e) => setQuickSale((prev) => ({ ...prev, fiadoCustomer: e.target.value }))}
                       onKeyDown={(e) => handleEnterAction(e, quickSaleSubmit)}
                       className="rounded-2xl border border-slate-300 bg-white px-3 py-3 outline-none disabled:opacity-50"
                       placeholder="Nome do cliente"
                     />
-                    <datalist id="fiado-customers-list">
-                      {fiadoCustomerOptions.map((name) => (
-                        <option key={name} value={name} />
-                      ))}
-                    </datalist>
-                    <p className="text-xs text-slate-500">
-                      Se o cliente já existir, o novo valor será somado no mesmo fiado com histórico por data.
-                    </p>
                   </label>
                 ) : null}
 
                 <div>
-                  <ActionButton disabled={!cashOpen} onClick={quickSaleSubmit} variant="dark">
+                  <ActionButton disabled={!cashOpen} onClick={() => runActionWithLoading("quick-sale", quickSaleSubmit)} loading={actionLoading === "quick-sale"} loadingText="Finalizando..." variant="dark">
                     Finalizar venda
                   </ActionButton>
                 </div>
@@ -3231,7 +3348,7 @@ export default function App() {
               title="Nova comanda"
               subtitle="Criação com validação de nome ou número."
               action={
-                <ActionButton disabled={!cashOpen} onClick={createComanda} variant="dark">
+                <ActionButton disabled={!cashOpen} onClick={() => runActionWithLoading("create-comanda", createComanda)} loading={actionLoading === "create-comanda"} loadingText="Criando..." variant="dark">
                   Criar comanda
                 </ActionButton>
               }
@@ -3331,7 +3448,7 @@ export default function App() {
                       />
                     </label>
 
-                    <div className="space-y-3">
+                    <div className="max-h-[32rem] overflow-y-auto pr-1 space-y-3">
                       {itemLines.map((line, index) => (
                         <div key={index} className="grid gap-3 md:grid-cols-[1fr_140px_auto]">
                           <select
@@ -3476,13 +3593,20 @@ export default function App() {
                         <select
                           disabled={!cashOpen}
                           value={closeForm.table}
-                          onChange={(e) =>
+                          onChange={async (e) => {
+                            const nextTable = e.target.value;
                             setCloseForm((prev) => ({
                               ...prev,
-                              table: e.target.value,
+                              table: nextTable,
                               tokenQuantity: 0,
-                            }))
-                          }
+                            }));
+                            if (selectedComanda) {
+                              setComandas((prev) => prev.map((c) => c.id === selectedComanda.id ? { ...c, table: nextTable } : c));
+                              try {
+                                await supabase.from("comandas").update({ table_name: nextTable }).eq("id", selectedComanda.id);
+                              } catch {}
+                            }
+                          }}
                           className="rounded-2xl border border-slate-300 bg-white px-3 py-3 outline-none disabled:opacity-50"
                         >
                           <option>Nenhuma</option>
@@ -3593,7 +3717,6 @@ export default function App() {
                         <span>Nome do cliente fiado</span>
                         <input
                           disabled={!cashOpen}
-                          list="fiado-customers-list"
                           value={closeForm.fiadoCustomer}
                           onChange={(e) =>
                             setCloseForm((prev) => ({
@@ -3604,19 +3727,11 @@ export default function App() {
                           className="rounded-2xl border border-slate-300 bg-white px-3 py-3 outline-none disabled:opacity-50"
                           placeholder="Nome do cliente"
                         />
-                        <datalist id="fiado-customers-list">
-                          {fiadoCustomerOptions.map((name) => (
-                            <option key={name} value={name} />
-                          ))}
-                        </datalist>
-                        <p className="text-xs text-slate-500">
-                          Se o cliente já existir, o novo valor será somado no mesmo fiado com histórico por data.
-                        </p>
                       </label>
                     ) : null}
 
                     <div className="flex flex-wrap gap-2">
-                      <ActionButton disabled={!cashOpen} onClick={closeSelectedComanda} variant="dark">
+                      <ActionButton disabled={!cashOpen} onClick={() => runActionWithLoading("close-comanda", closeSelectedComanda)} loading={actionLoading === "close-comanda"} loadingText="Encerrando..." variant="dark">
                         Encerrar comanda
                       </ActionButton>
 
@@ -3641,7 +3756,7 @@ export default function App() {
               title={editingProductId ? "Editar produto" : "Cadastrar produto"}
               subtitle="Cadastro manual com valor, descrição e estoque."
               action={
-                <ActionButton disabled={!cashOpen} onClick={createOrUpdateProduct} variant="dark">
+                <ActionButton disabled={!cashOpen} onClick={() => runActionWithLoading("save-product", createOrUpdateProduct)} loading={actionLoading === "save-product"} loadingText={editingProductId ? "Salvando..." : "Cadastrando..."} variant="dark">
                   {editingProductId ? "Salvar edição" : "Salvar produto"}
                 </ActionButton>
               }
@@ -3689,7 +3804,7 @@ export default function App() {
                 </label>
               </div>
 
-              <div className="grid gap-3 md:grid-cols-2">
+              <div className="max-h-[32rem] overflow-y-auto pr-1 overscroll-contain"><div className="grid gap-3 md:grid-cols-2">
                 {filteredProducts.map((product) => (
                   <div key={product.id} className="rounded-2xl bg-slate-50 p-4 ring-1 ring-slate-200">
                     <div className="flex items-center justify-between gap-3">
@@ -3722,7 +3837,7 @@ export default function App() {
                     </div>
                   </div>
                 ))}
-              </div>
+              </div></div>
             </Section>
           </div>
         )}
@@ -3732,68 +3847,43 @@ export default function App() {
             <div className="grid gap-4 md:grid-cols-2">
               {[["Mesa 1", mesa1, "mesa1"], ["Mesa 2", mesa2, "mesa2"]].map(([mesa, state, key]) => {
                 const fiadoStats = mesaPendingFiadoStats[key];
+                const overdueStats = mesaOverdueStats[key];
                 return (
                 <div key={mesa} className="min-w-0 overflow-hidden rounded-3xl bg-slate-50 p-4 ring-1 ring-slate-200">
                   <div className="flex items-center justify-between gap-2">
                     <h3 className="truncate text-lg font-bold">{mesa}</h3>
                     {state.pending > 0 ? (
-                      <span className="whitespace-nowrap rounded-full bg-amber-100 px-3 py-1 text-xs font-bold text-amber-700">
-                        {state.pending} pendentes
-                      </span>
+                      <span className="whitespace-nowrap rounded-full bg-amber-100 px-3 py-1 text-xs font-bold text-amber-700">{state.pending} pendentes</span>
                     ) : (
-                      <span className="whitespace-nowrap rounded-full bg-emerald-100 px-3 py-1 text-xs font-bold text-emerald-700">
-                        Quitada
-                      </span>
+                      <span className="whitespace-nowrap rounded-full bg-emerald-100 px-3 py-1 text-xs font-bold text-emerald-700">Pronta para uso</span>
                     )}
                   </div>
 
                   <div className="mt-4 grid gap-2 text-sm text-slate-600">
-                    <div className="flex items-center justify-between gap-3">
-                      <span className="truncate">Total de fichas</span>
-                      <strong>{state.total}</strong>
-                    </div>
-                    <div className="flex items-center justify-between gap-3">
-                      <span className="truncate">Fichas pagas</span>
-                      <strong>{state.paid}</strong>
-                    </div>
-                    <div className="flex items-center justify-between gap-3">
-                      <span className="truncate">Fichas pendentes</span>
-                      <strong>{state.pending}</strong>
-                    </div>
-                    <div className="flex items-center justify-between gap-3">
-                      <span className="truncate">Fichas fiadas pendentes</span>
-                      <strong>{fiadoStats.tokens}</strong>
-                    </div>
-                    <div className="flex items-center justify-between gap-3">
-                      <span className="truncate">Valor pendente na mesa</span>
-                      <strong>{currency(state.pending * fichaPrice)}</strong>
-                    </div>
-                    <div className="flex items-center justify-between gap-3">
-                      <span className="truncate">Valor total de fiados pendentes</span>
-                      <strong>{currency(fiadoStats.total)}</strong>
-                    </div>
+                    <div className="flex items-center justify-between gap-3"><span className="truncate">Total de fichas</span><strong>{state.total}</strong></div>
+                    <div className="flex items-center justify-between gap-3"><span className="truncate">Fichas pendentes</span><strong>{state.pending}</strong></div>
+                    <div className="flex items-center justify-between gap-3"><span className="truncate">Fichas pagas</span><strong>{state.paid}</strong></div>
+                    <div className="flex items-center justify-between gap-3"><span className="truncate inline-flex items-center gap-2">Valor total pago em dinheiro <button type="button" onClick={() => notify("Esse total pode ultrapassar a conta simples das fichas pagas da mesa atual, porque também pode incluir quitações de fichas vencidas ou quitações manuais de pendências da mesa.", "info")} className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-slate-200 text-slate-700"><Info size={12} /></button></span><strong>{currency(Number(state.paidValue || 0))}</strong></div>
+                    <div className="flex items-center justify-between gap-3"><span className="truncate">Fichas não pagas</span><strong>{Number(state.unpaidTokens || 0)}</strong></div>
+                    <div className="flex items-center justify-between gap-3"><span className="truncate">Fichas fiadas pendentes</span><strong>{fiadoStats.tokens}</strong></div>
+                    <div className="flex items-center justify-between gap-3"><span className="truncate">Valor total das fichas pendentes</span><strong>{currency(Number(state.pending || 0) * fichaPrice)}</strong></div>
+                    <div className="flex items-center justify-between gap-3"><span className="truncate">Valor total das fichas não pagas</span><strong>{currency(Number(state.unpaidValue || 0))}</strong></div>
+                    <div className="flex items-center justify-between gap-3"><span className="truncate">Valor total de fiados pendentes</span><strong>{currency(fiadoStats.total)}</strong></div>
+                    <div className="flex items-center justify-between gap-3"><span className="truncate">Fichas fiadas vencidas</span><strong>{overdueStats.tokens}</strong></div>
+                    <div className="flex items-center justify-between gap-3"><span className="truncate">Valor total de fichas fiadas vencidas</span><strong>{currency(overdueStats.total)}</strong></div>
+                    <div className="flex items-center justify-between gap-3"><span className="truncate">Total de fichas fiadas vencidas pagas</span><strong>{Number(state.overduePaidTokens || 0)}</strong></div>
+                    <div className="flex items-center justify-between gap-3"><span className="truncate">Valor das fichas fiadas vencidas pagas</span><strong>{currency(Number(state.overduePaidValue || 0))}</strong></div>
                   </div>
+
+                  <p className="mt-4 text-xs leading-5 text-slate-500">Fichas pendentes são as fichas ainda abertas da mesa atual. Ao pagar, elas saem de pendentes e entram em fichas pagas. Ao quitar a mesa manualmente, as pendências saem de fichas pendentes e passam para fichas não pagas. Fichas fiadas pendentes pertencem a clientes ainda vinculados a uma mesa aberta. Quando a mesa é fechada com fiado em aberto, essas fichas passam para o campo de fichas fiadas vencidas. Quando esse fiado vencido é pago, ele sai de fichas fiadas vencidas, entra em fichas pagas, soma no total pago em dinheiro e também fica registrado em fichas fiadas vencidas pagas. Fichas não pagas e fichas fiadas vencidas agora são controles separados.</p>
 
                   <div className="mt-4 grid gap-2">
                     <div className="grid grid-cols-[1fr_auto] gap-2">
-                      <input
-                        disabled={!cashOpen}
-                        type="number"
-                        min={1}
-                        value={mesaTokenInputs[key]}
-                        onChange={(e) => setMesaTokenInputs((prev) => ({ ...prev, [key]: e.target.value }))}
-                        className="min-w-0 rounded-2xl border border-slate-300 bg-white px-3 py-3 outline-none disabled:opacity-50"
-                      />
-                      <ActionButton disabled={!cashOpen} onClick={() => addMesaTokens(key)} variant="emerald">
-                        <span className="inline-flex items-center gap-2">
-                          <Plus size={16} /> fichas
-                        </span>
-                      </ActionButton>
+                      <input disabled={!cashOpen} type="number" min={1} value={mesaTokenInputs[key]} onChange={(e) => setMesaTokenInputs((prev) => ({ ...prev, [key]: e.target.value }))} className="min-w-0 rounded-2xl border border-slate-300 bg-white px-3 py-3 outline-none disabled:opacity-50" />
+                      <ActionButton disabled={!cashOpen} onClick={() => addMesaTokens(key)} variant="emerald"><span className="inline-flex items-center gap-2"><Plus size={16} /> fichas</span></ActionButton>
                     </div>
-
-                    <ActionButton disabled={!cashOpen} onClick={() => closeMesa(mesa)} variant="dark">
-                      Fechar mesa
-                    </ActionButton>
+                    <ActionButton disabled={!cashOpen} onClick={() => closeMesa(mesa)} variant="dark">Fechar mesa</ActionButton>
+                    <ActionButton disabled={!cashOpen} onClick={() => quitMesa(mesa)} variant="amber">Quitar mesa</ActionButton>
                   </div>
                 </div>
                 );
@@ -3804,62 +3894,37 @@ export default function App() {
               <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
                 <div>
                   <h3 className="text-xl font-bold text-slate-900">Histórico das mesas</h3>
-                  <p className="mt-1 text-sm text-slate-500">
-                    Fechamentos, pagamentos e movimentações de fichas.
-                  </p>
+                  <p className="mt-1 text-sm text-slate-500">Fechamentos, pagamentos e movimentações de fichas.</p>
                 </div>
-
                 <div className="flex flex-wrap gap-2">
-                  <select
-                    value={mesaFilterDays}
-                    onChange={(e) => setMesaFilterDays(e.target.value)}
-                    className="rounded-2xl border border-slate-300 bg-white px-3 py-2 outline-none"
-                  >
-                    <option value="7">7 dias</option>
-                    <option value="15">15 dias</option>
-                    <option value="30">30 dias</option>
+                  <select value={mesaFilterDays} onChange={(e) => setMesaFilterDays(e.target.value)} className="rounded-2xl border border-slate-300 bg-white px-3 py-2 outline-none">
+                    <option value="7">7 dias</option><option value="15">15 dias</option><option value="30">30 dias</option>
                   </select>
-
-                  <ActionButton onClick={downloadMesaHistoryReport} variant="light">
-                    <span className="inline-flex items-center gap-2">
-                      <Download size={16} /> Baixar relatório
-                    </span>
-                  </ActionButton>
+                  <ActionButton onClick={downloadMesaHistoryReport} variant="light"><span className="inline-flex items-center gap-2"><Download size={16} /> Baixar relatório</span></ActionButton>
                 </div>
               </div>
-
-              <div className="max-h-[520px] space-y-2 overflow-y-auto pr-1">
+              <div className="max-h-[32rem] overflow-y-auto pr-1">
+                <div className="space-y-2">
                 {filteredMesaHistory.length === 0 ? (
-                  <div className="rounded-2xl bg-slate-50 p-4 text-sm text-slate-500 ring-1 ring-slate-200">
-                    Nenhum histórico de mesa registrado ainda.
-                  </div>
+                  <div className="rounded-2xl bg-slate-50 p-4 text-sm text-slate-500 ring-1 ring-slate-200">Nenhum histórico de mesa registrado ainda.</div>
                 ) : (
                   filteredMesaHistory.map((entry) => (
-                    <div
-                      key={entry.id}
-                      className="rounded-2xl bg-slate-50 px-4 py-3 ring-1 ring-slate-200"
-                    >
+                    <div key={entry.id} className="rounded-2xl bg-slate-50 px-4 py-3 ring-1 ring-slate-200">
                       <div className="flex flex-wrap items-center justify-between gap-3">
-                        <div>
-                          <p className="font-semibold text-slate-900">
-                            {entry.mesa} • {entry.action}
-                          </p>
-                          <p className="mt-1 text-sm text-slate-500">{entry.at}</p>
-                        </div>
+                        <div><p className="font-semibold text-slate-900">{entry.mesa} • {entry.action}</p><p className="mt-1 text-sm text-slate-500">{entry.at}</p></div>
                         <strong>{currency(entry.value)}</strong>
                       </div>
-
                       <div className="mt-3 grid gap-2 text-sm text-slate-600 md:grid-cols-4">
                         <div>Total de fichas: <strong>{entry.total}</strong></div>
                         <div>Fichas pagas: <strong>{entry.paid}</strong></div>
-                        <div>Fichas pendentes: <strong>{entry.pending}</strong></div>
+                        <div>Fichas não pagas: <strong>{entry.pending}</strong></div>
                         <div>Movimentadas: <strong>{entry.tokenQuantity}</strong></div>
                       </div>
-
                       <p className="mt-2 text-sm text-slate-600">{entry.details}</p>
                     </div>
                   ))
                 )}
+                </div>
               </div>
             </div>
           </Section>
@@ -3867,8 +3932,8 @@ export default function App() {
 
         {activePage === "fiados" && (
           <div className="grid gap-6 xl:grid-cols-2">
-            <Section title="Fiados pendentes" subtitle={`Total pendente: ${currency(totalFiadoPending)}`}>
-              <div className="max-h-[620px] space-y-3 overflow-y-auto pr-1">
+            <Section title="Fiados pendentes" subtitle={`Total pendente: ${currency(totalFiadoPending)}`}><div className="mb-4 text-xs leading-5 text-slate-500">Se o cliente já existir, o sistema pede confirmação antes de somar novo valor no mesmo cadastro. Fiado vencido indica dívida em atraso por conter fichas fiadas vencidas de uma mesa já encerrada. Quando pago, ele entra no caixa, soma em total de fichas, fichas pagas e valor total pago em dinheiro da mesa de origem, e sai do campo de fichas fiadas vencidas.</div>
+              <div className="max-h-[32rem] overflow-y-auto pr-1 space-y-3">
                 {fiados.length === 0 ? (
                   <div className="rounded-2xl bg-slate-50 p-4 text-sm text-slate-500 ring-1 ring-slate-200">
                     Nenhum fiado pendente.
@@ -3878,7 +3943,7 @@ export default function App() {
                     <div key={fiado.id} className="rounded-2xl bg-slate-50 p-4 ring-1 ring-slate-200">
                       <div className="flex flex-wrap items-center justify-between gap-3">
                         <div className="min-w-0">
-                          <p className="break-words font-semibold">{fiado.customer}</p>
+                          <p className="break-words font-semibold">{fiadoDisplayName(fiado)}</p>
                           <p className="text-sm text-slate-500">
                             Fichas: {fiado.pendingTokens} • Pago parcial: {currency(fiado.partialPaid)}
                           </p>
@@ -3897,20 +3962,12 @@ export default function App() {
                           className="rounded-2xl border border-slate-300 bg-white px-3 py-3 outline-none disabled:opacity-50"
                         />
 
-                        <ActionButton disabled={!cashOpen} onClick={() => addPartialPayment(fiado.id)} variant="sky">
+                        <ActionButton disabled={!cashOpen} onClick={() => runActionWithLoading(`fiado-partial-${fiado.id}`, () => addPartialPayment(fiado.id))} loading={actionLoading === `fiado-partial-${fiado.id}`} loadingText="Lançando..." variant="sky">
                           Lançar parcial
                         </ActionButton>
 
-                        <ActionButton disabled={!cashOpen} onClick={() => settleFiado(fiado)} variant="emerald">
+                        <ActionButton disabled={!cashOpen} onClick={() => runActionWithLoading(`fiado-settle-${fiado.id}`, () => settleFiado(fiado))} loading={actionLoading === `fiado-settle-${fiado.id}`} loadingText="Quitando..." variant="emerald">
                           Quitar tudo
-                        </ActionButton>
-                      </div>
-
-                      <div className="mt-3 flex flex-wrap gap-2">
-                        <ActionButton onClick={() => openReceipt(buildFiadoReceiptData(fiado, "Pendente"))} variant="light">
-                          <span className="inline-flex items-center gap-2">
-                            <Receipt size={16} /> Comprovante detalhado
-                          </span>
                         </ActionButton>
                       </div>
                     </div>
@@ -3920,7 +3977,7 @@ export default function App() {
             </Section>
 
             <Section title="Fiados quitados" subtitle={`Total quitado: ${currency(totalFiadoPaid)}`}>
-              <div className="max-h-[620px] space-y-3 overflow-y-auto pr-1">
+              <div className="max-h-[32rem] overflow-y-auto pr-1 space-y-3">
                 {fiadosQuitados.length === 0 ? (
                   <div className="rounded-2xl bg-slate-50 p-4 text-sm text-slate-500 ring-1 ring-slate-200">
                     Nenhum fiado quitado ainda.
@@ -3930,18 +3987,10 @@ export default function App() {
                     <div key={fiado.id} className="rounded-2xl bg-slate-50 p-4 ring-1 ring-slate-200">
                       <div className="flex items-center justify-between gap-3">
                         <div>
-                          <p className="font-semibold">{fiado.customer}</p>
+                          <p className="font-semibold">{fiadoDisplayName(fiado)}</p>
                           <p className="text-sm text-slate-500">Quitado em {fiado.at}</p>
                         </div>
                         <strong className="text-emerald-700">{currency(fiado.total)}</strong>
-                      </div>
-
-                      <div className="mt-3 flex flex-wrap gap-2">
-                        <ActionButton onClick={() => openReceipt(buildFiadoReceiptData(fiado, "Quitado"))} variant="light">
-                          <span className="inline-flex items-center gap-2">
-                            <Receipt size={16} /> Comprovante detalhado
-                          </span>
-                        </ActionButton>
                       </div>
                     </div>
                   ))
@@ -4007,26 +4056,25 @@ export default function App() {
                     </span>
                   </ActionButton>
 
-                  <ActionButton onClick={openCloseCash} variant={cashOpen ? "rose" : "emerald"}>
+                  <ActionButton onClick={() => runActionWithLoading("toggle-cash", openCloseCash)} loading={actionLoading === "toggle-cash"} loadingText={cashOpen ? "Fechando..." : "Abrindo..."} variant={cashOpen ? "rose" : "emerald"}>
                     {cashOpen ? "Fechar caixa" : "Abrir caixa"}
                   </ActionButton>
                 </div>
               }
             >
-              <div className="space-y-3">
+              <div className="grid gap-3 md:grid-cols-3">
                 <div className="rounded-2xl bg-slate-50 px-4 py-3 text-sm text-slate-600 ring-1 ring-slate-200">
-                  {cashOpen ? "Caixa aberto" : "Caixa fechado"} • {cashOpen ? "Lançamentos de hoje" : "Lançamentos"}: {currency(totalCashToday)}
+                  <p className="font-semibold text-slate-800">{cashOpen ? "Caixa aberto" : "Caixa fechado"}</p>
+                  <p className="mt-1">{cashOpen ? "Lançamentos de hoje" : "Lançamentos da sessão fechada"}: {currency(totalCashToday)}</p>
                 </div>
                 <div className="rounded-2xl bg-slate-50 px-4 py-3 text-sm text-slate-600 ring-1 ring-slate-200">
-                  Totalização geral de todos os lançamentos: {currency(totalGeneralEntries)}
+                  <p className="font-semibold text-slate-800">Todos os lançamentos</p>
+                  <p className="mt-1">{currency(totalAllLaunches)}</p>
                 </div>
-              </div>
-
-              <div className="mt-4 rounded-3xl bg-emerald-50 p-5 ring-1 ring-emerald-200">
-                <p className="text-sm text-emerald-800">Disponível no caixa</p>
-                <p className="mt-2 text-3xl font-black text-emerald-950">
-                  {currency(availableCashBalance)}
-                </p>
+                <div className="rounded-2xl bg-emerald-50 px-4 py-3 text-sm text-emerald-700 ring-1 ring-emerald-200">
+                  <p className="font-semibold">Disponível no caixa</p>
+                  <p className="mt-1 text-2xl font-black text-emerald-900">{currency(availableCashBalance)}</p>
+                </div>
               </div>
 
               <div className="mt-4 grid gap-3 md:grid-cols-2">
@@ -4051,21 +4099,17 @@ export default function App() {
                 </div>
               </div>
 
-              <div className="mt-4 max-h-[28rem] space-y-2 overflow-y-auto pr-1">
-                {filteredCashEntries.map((entry) => (
+              <div className="mt-4 max-h-[32rem] overflow-y-auto pr-1 space-y-2">
+                {filteredCashEntries.slice(0, 12).map((entry) => (
                   <div
                     key={entry.id}
-                    onClick={() => removeCashEntry(entry)}
-                    className={`flex cursor-pointer items-start justify-between gap-3 rounded-2xl px-4 py-3 ring-1 text-sm ${
+                    onClick={() => !entry.synthetic && removeCashEntry(entry)}
+                    className={`flex ${entry.synthetic ? "cursor-default" : "cursor-pointer"} items-start justify-between gap-3 rounded-2xl px-4 py-3 ring-1 text-sm ${
                       entry.entryType === "withdrawal"
                         ? "bg-rose-50 ring-rose-200"
                         : entry.entryType === "loan"
                         ? "bg-fuchsia-50 ring-fuchsia-200"
-                        : entry.entryType === "loan-payment" && entry.method === "Pagamento parcial"
-                        ? "bg-amber-50 ring-amber-200"
-                        : entry.entryType === "loan-payment" && entry.method === "Quitação total"
-                        ? "bg-emerald-50 ring-emerald-200"
-                        : Number(entry.total || 0) > 0
+                        : entry.entryType === "loan-payment"
                         ? "bg-emerald-50 ring-emerald-200"
                         : "bg-slate-50 ring-slate-200"
                     }`}
@@ -4077,7 +4121,7 @@ export default function App() {
                       <p className="mt-1 break-words text-xs text-slate-500">
                         {(entry.items || []).length > 0
                           ? entry.items.map((item) => `${item.quantity}x ${item.name}`).join(" • ")
-                          : "Sem itens detalhados"}
+                          : entry.description || "Sem itens detalhados"}
                       </p>
                     </div>
                     <strong
@@ -4086,11 +4130,7 @@ export default function App() {
                           ? "text-rose-700"
                           : entry.entryType === "loan"
                           ? "italic text-fuchsia-400"
-                          : entry.entryType === "loan-payment" && entry.method === "Pagamento parcial"
-                          ? "text-amber-700"
-                          : entry.entryType === "loan-payment" && entry.method === "Quitação total"
-                          ? "text-emerald-700"
-                          : Number(entry.total || 0) > 0
+                          : entry.entryType === "loan-payment"
                           ? "text-emerald-700"
                           : "text-slate-900"
                       }
@@ -4150,7 +4190,7 @@ export default function App() {
                 </label>
 
                 <div className="flex items-end">
-                  <ActionButton disabled={!cashOpen} onClick={addCash2Entry} variant="violet">
+                  <ActionButton disabled={!cashOpen} onClick={() => runActionWithLoading("cash2-entry", addCash2Entry)} loading={actionLoading === "cash2-entry"} loadingText="Salvando..." variant="violet">
                     Lançar
                   </ActionButton>
                 </div>
@@ -4161,7 +4201,8 @@ export default function App() {
                 </div>
               </div>
 
-              <div className="mt-4 max-h-72 space-y-2 overflow-y-auto pr-1">
+              <div className="mt-4 rounded-2xl bg-white max-h-[32rem] overflow-y-auto pr-1 overscroll-contain">
+                <div className="space-y-2">
                 {cash2Entries.map((entry) => (
                   <div key={entry.id} className="flex items-center justify-between gap-3 rounded-2xl bg-slate-50 px-4 py-3 ring-1 ring-slate-200 text-sm">
                     <span className="min-w-0 break-words inline-flex items-center gap-2">
@@ -4172,9 +4213,20 @@ export default function App() {
                       )}
                       {entry.at} • {entry.description}
                     </span>
-                    <strong>{currency(entry.value)}</strong>
+                    <div className="flex items-center gap-2">
+                      <strong>{currency(entry.value)}</strong>
+                      <button
+                        type="button"
+                        onClick={() => removeCash2Entry(entry.id)}
+                        className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-white text-rose-600 ring-1 ring-slate-200 transition hover:bg-rose-50"
+                        title="Excluir lançamento"
+                      >
+                        <X size={16} />
+                      </button>
+                    </div>
                   </div>
                 ))}
+                </div>
               </div>
             </Section>
           </div>
@@ -4208,34 +4260,13 @@ export default function App() {
                   />
                 </label>
 
-                <div className="rounded-2xl bg-emerald-50 p-4 ring-1 ring-emerald-200 text-sm text-emerald-950">
+                <div className="rounded-2xl bg-amber-50 p-4 ring-1 ring-amber-200 text-sm text-amber-900">
                   Saldo disponível: <strong>{currency(availableCashBalance)}</strong>
                 </div>
 
-                <ActionButton onClick={addWithdrawal} variant="rose">
+                <ActionButton onClick={() => runActionWithLoading("withdrawal", addWithdrawal)} loading={actionLoading === "withdrawal"} loadingText="Lançando..." variant="rose">
                   Registrar retirada
                 </ActionButton>
-
-                <div className="rounded-2xl bg-white p-4 ring-1 ring-slate-200">
-                  <p className="text-sm font-semibold text-slate-700">Histórico de retiradas</p>
-                  <div className="mt-3 max-h-72 space-y-2 overflow-y-auto pr-1">
-                    {withdrawals.length === 0 ? (
-                      <div className="rounded-2xl bg-slate-50 p-3 text-sm text-slate-500 ring-1 ring-slate-200">
-                        Nenhuma retirada registrada.
-                      </div>
-                    ) : (
-                      withdrawals.map((entry) => (
-                        <div key={entry.id} className="flex items-center justify-between gap-3 rounded-2xl bg-rose-50 px-4 py-3 ring-1 ring-rose-200 text-sm">
-                          <div className="min-w-0">
-                            <p className="break-words text-rose-700">{entry.at}</p>
-                            <p className="mt-1 break-words text-xs text-slate-600">{entry.description || "Sem descrição"}</p>
-                          </div>
-                          <strong className="text-rose-700">{currency(entry.value)}</strong>
-                        </div>
-                      ))
-                    )}
-                  </div>
-                </div>
               </div>
             </Section>
 
@@ -4244,20 +4275,11 @@ export default function App() {
                 <label className="grid gap-2 text-sm font-medium text-slate-700">
                   <span>Cliente</span>
                   <input
-                    list="loan-customers-list"
                     value={loanForm.customer}
                     onChange={(e) => setLoanForm((prev) => ({ ...prev, customer: e.target.value }))}
                     onKeyDown={(e) => handleEnterAction(e, addLoan)}
                     className="rounded-2xl border border-slate-300 bg-white px-3 py-3 outline-none"
                   />
-                  <datalist id="loan-customers-list">
-                    {loanCustomerOptions.map((name) => (
-                      <option key={name} value={name} />
-                    ))}
-                  </datalist>
-                  <p className="text-xs text-slate-500">
-                    Se o cliente já existir, o novo empréstimo será somado no mesmo cadastro com histórico por data.
-                  </p>
                 </label>
 
                 <label className="grid gap-2 text-sm font-medium text-slate-700">
@@ -4271,11 +4293,11 @@ export default function App() {
                   />
                 </label>
 
-                <div className="rounded-2xl bg-emerald-50 p-4 ring-1 ring-emerald-200 text-sm text-emerald-950">
+                <div className="rounded-2xl bg-amber-50 p-4 ring-1 ring-amber-200 text-sm text-amber-900">
                   Saldo disponível: <strong>{currency(availableCashBalance)}</strong>
                 </div>
 
-                <ActionButton onClick={addLoan} variant="fuchsia">
+                <ActionButton onClick={() => runActionWithLoading("loan", addLoan)} loading={actionLoading === "loan"} loadingText="Lançando..." variant="fuchsia">
                   Registrar empréstimo
                 </ActionButton>
               </div>
@@ -4285,7 +4307,7 @@ export default function App() {
               title="Empréstimos pendentes e quitados"
               subtitle="Pagamentos parciais e quitação total."
             >
-              <div className="max-h-[42rem] space-y-3 overflow-y-auto pr-1">
+              <div className="max-h-[32rem] overflow-y-auto pr-1 space-y-3">
                 {loans.length === 0 ? (
   <div className="rounded-2xl bg-slate-50 p-4 text-sm text-slate-500 ring-1 ring-slate-200">
     Nenhum empréstimo registrado.
@@ -4319,29 +4341,20 @@ export default function App() {
               className="rounded-2xl border border-slate-300 bg-white px-3 py-3 outline-none"
             />
 
-            <ActionButton onClick={() => addLoanPartialPayment(loan.id)} variant="sky">
+            <ActionButton onClick={() => runActionWithLoading(`loan-partial-${loan.id}`, () => addLoanPartialPayment(loan.id))} loading={actionLoading === `loan-partial-${loan.id}`} loadingText="Lançando..." variant="sky">
               Pagar parcial
             </ActionButton>
 
-            <ActionButton onClick={() => settleLoan(loan)} variant="emerald">
+            <ActionButton onClick={() => runActionWithLoading(`loan-settle-${loan.id}`, () => settleLoan(loan))} loading={actionLoading === `loan-settle-${loan.id}`} loadingText="Quitando..." variant="emerald">
               Quitar total
             </ActionButton>
           </div>
 
           {loan.history?.length ? (
-            <div className="mt-3 max-h-52 space-y-2 overflow-y-auto rounded-2xl bg-white p-3 pr-2 ring-1 ring-slate-200">
+            <div className="mt-3 space-y-2 rounded-2xl bg-white p-3 ring-1 ring-slate-200">
               <p className="text-sm font-semibold text-slate-700">Histórico</p>
               {loan.history.map((h, idx) => (
-                <div
-                  key={idx}
-                  className={`flex items-center justify-between text-sm ${
-                    h.type === "Pagamento parcial"
-                      ? "text-amber-700"
-                      : h.type === "Quitação total"
-                      ? "text-emerald-700"
-                      : "text-slate-600"
-                  }`}
-                >
+                <div key={idx} className="flex items-center justify-between text-sm text-slate-600">
                   <span>{h.type}</span>
                   <span>{currency(h.value)} • {h.at}</span>
                 </div>
@@ -4373,19 +4386,13 @@ export default function App() {
             </div>
 
             {loan.history?.length ? (
-              <div className="mt-3 max-h-52 space-y-2 overflow-y-auto rounded-2xl bg-white p-3 pr-2 ring-1 ring-slate-200">
+              <div className="mt-3 space-y-2 rounded-2xl bg-white p-3 ring-1 ring-slate-200">
                 <p className="text-sm font-semibold text-slate-700">Histórico</p>
 
                 {loan.history.map((h, idx) => (
                   <div
                     key={idx}
-                    className={`flex items-center justify-between text-sm ${
-                      h.type === "Pagamento parcial"
-                        ? "text-amber-700"
-                        : h.type === "Quitação total"
-                        ? "text-emerald-700"
-                        : "text-slate-600"
-                    }`}
+                    className="flex items-center justify-between text-sm text-slate-600"
                   >
                     <span>{h.type}</span>
                     <span>
@@ -4422,7 +4429,7 @@ export default function App() {
 
         <footer className="mt-8 rounded-3xl bg-slate-900 px-5 py-4 text-sm text-slate-300">
           <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
-            <span>© Bar do Pereira</span>
+            <span>Bar do Pereira</span>
             <span>Sistema de gestão</span>
           </div>
         </footer>
@@ -4503,46 +4510,6 @@ export default function App() {
                   </>
                 ) : null}
 
-                {receiptModal.data.fiadoSummary ? (
-                  <div className="mt-3 rounded-2xl bg-slate-900 p-3">
-                    <p className="mb-2 font-semibold">Resumo do fiado</p>
-                    <div className="space-y-2 text-slate-300">
-                      <div className="flex items-center justify-between gap-3">
-                        <span>Status</span>
-                        <strong>{receiptModal.data.fiadoSummary.status}</strong>
-                      </div>
-                      <div className="flex items-center justify-between gap-3">
-                        <span>Pago parcial</span>
-                        <strong>{currency(receiptModal.data.fiadoSummary.partialPaid)}</strong>
-                      </div>
-                      <div className="flex items-center justify-between gap-3">
-                        <span>Saldo pendente</span>
-                        <strong>{currency(receiptModal.data.fiadoSummary.pending)}</strong>
-                      </div>
-                    </div>
-                  </div>
-                ) : null}
-
-                {receiptModal.data.history?.length ? (
-                  <div className="mt-3 rounded-2xl bg-slate-900 p-3">
-                    <p className="mb-2 font-semibold">Histórico do fiado</p>
-                    <div className="max-h-52 space-y-2 overflow-y-auto pr-1 text-slate-300">
-                      {receiptModal.data.history.map((item, index) => (
-                        <div key={`${item.type}-${index}`} className="rounded-2xl bg-slate-800 p-3">
-                          <div className="flex items-center justify-between gap-3">
-                            <span className="font-medium capitalize">{item.type}</span>
-                            <strong>{currency(item.value)}</strong>
-                          </div>
-                          <div className="mt-1 flex flex-wrap items-center justify-between gap-3 text-xs text-slate-400">
-                            <span>{item.method || "-"}</span>
-                            <span>{item.at || "-"}</span>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                ) : null}
-
                 <div className="flex items-center justify-between border-t border-dashed border-slate-700 pt-3 text-base">
                   <span>Total</span>
                   <strong className="text-amber-400">{currency(receiptModal.data.total)}</strong>
@@ -4599,14 +4566,13 @@ export default function App() {
               <ActionButton onClick={closeConfirm} variant="light">
                 Cancelar
               </ActionButton>
-              <ActionButton onClick={runConfirm} variant="dark">
+              <ActionButton onClick={() => runActionWithLoading("confirm-modal", runConfirm)} loading={actionLoading === "confirm-modal"} loadingText="Confirmando..." variant="dark">
                 Confirmar
               </ActionButton>
             </div>
           </div>
         </div>
       ) : null}
-
     </div>
   );
 }
