@@ -679,9 +679,142 @@ export default function App() {
     }
   }
 
-  function printReceipt() {
+  
+function buildThermalReceiptText(data) {
+  const width = 32;
+
+  const normalizeText = (value = "") =>
+    String(value ?? "")
+      .replace(/\s+/g, " ")
+      .trim();
+
+  const line = "-".repeat(width);
+  const lineBold = "=".repeat(width);
+
+  const center = (textValue) => {
+    const text = normalizeText(textValue);
+    if (!text) return "";
+    if (text.length >= width) return text;
+    const leftPadding = Math.floor((width - text.length) / 2);
+    return `${" ".repeat(Math.max(leftPadding, 0))}${text}`;
+  };
+
+  const leftRight = (left, right) => {
+    const leftText = normalizeText(left);
+    const rightText = normalizeText(right);
+    const space = width - leftText.length - rightText.length;
+    if (space <= 0) return `${leftText} ${rightText}`.trim();
+    return `${leftText}${" ".repeat(space)}${rightText}`;
+  };
+
+  const wrap = (textValue) => {
+    const text = normalizeText(textValue);
+    if (!text) return [""];
+    const words = text.split(" ");
+    const lines = [];
+    let current = "";
+
+    words.forEach((word) => {
+      const candidate = current ? `${current} ${word}` : word;
+      if (candidate.length <= width) {
+        current = candidate;
+      } else {
+        if (current) lines.push(current);
+        current = word;
+      }
+    });
+
+    if (current) lines.push(current);
+    return lines;
+  };
+
+  const money = (value) =>
+    currency(Number(value || 0))
+      .replace(/\s/g, "")
+      .replace(",00", ",00");
+
+  const output = [];
+
+  output.push(center("BAR DO PEREIRA"));
+  output.push(center("COMPROVANTE NAO FISCAL"));
+  output.push(line);
+
+  output.push(leftRight("Comanda:", data.code || "Venda"));
+  output.push(leftRight("Cliente:", data.customer || "Balcao"));
+  output.push(leftRight("Data:", data.at || ""));
+
+  output.push(line);
+  output.push("ITENS");
+
+  mergeItemsByProduct(data.products || []).forEach((product) => {
+    const itemName = `${Number(product.quantity || 0)}x ${product.name || "Item"}`;
+    const totalValue = money(Number(product.price || 0) * Number(product.quantity || 0));
+    const reservedWidth = Math.max(8, width - totalValue.length - 1);
+    const words = itemName.split(" ");
+    let firstLine = "";
+    let consumedWords = 0;
+
+    for (const word of words) {
+      const candidate = firstLine ? `${firstLine} ${word}` : word;
+      if (candidate.length <= reservedWidth) {
+        firstLine = candidate;
+        consumedWords += 1;
+      } else {
+        break;
+      }
+    }
+
+    if (!firstLine) {
+      output.push(itemName);
+      output.push(leftRight("", totalValue));
+      return;
+    }
+
+    output.push(leftRight(firstLine, totalValue));
+    const remainingText = words.slice(consumedWords).join(" ");
+    wrap(remainingText).forEach((lineText) => {
+      if (lineText) output.push(lineText);
+    });
+  });
+
+  if (Number(data.tokens || 0) > 0) {
+    output.push(leftRight(`${Number(data.tokens)}x Ficha de sinuca`, money(Number(data.tokens || 0) * fichaPrice)));
+  }
+
+  output.push(line);
+  output.push(leftRight("Pagamento:", data.paymentMethod || "-"));
+
+  if (String(data.paymentMethod || "") === "Dinheiro") {
+    output.push(leftRight("Recebido:", money(data.amountReceived)));
+    output.push(leftRight("Troco:", money(data.troco)));
+  }
+
+  output.push(lineBold);
+  output.push(leftRight("TOTAL:", money(data.total)));
+  output.push("");
+  output.push(center("Obrigado pela preferencia!"));
+  output.push("");
+  output.push(data.at || "");
+
+  return output.join("\n");
+}
+
+function printReceipt() {
     const data = receiptModal.data;
     if (!data) return;
+
+    const thermalText = buildThermalReceiptText(data);
+    const isAndroid = /Android/i.test(navigator.userAgent || "");
+
+    if (isAndroid) {
+      try {
+        const rawbtUrl = `rawbt:base64,${btoa(unescape(encodeURIComponent(thermalText)))}`;
+        window.location.href = rawbtUrl;
+        return;
+      } catch (error) {
+        console.error("Falha ao abrir RawBT:", error);
+      }
+    }
 
     const itemsHtml = mergeItemsByProduct(data.products || [])
       .map(
@@ -725,14 +858,15 @@ export default function App() {
           <meta charset="UTF-8" />
           <title>Cupom não fiscal</title>
           <style>
-            body { font-family: Arial, sans-serif; padding: 24px; color: #111; }
-            .wrap { max-width: 420px; margin: 0 auto; border: 1px dashed #999; padding: 20px; }
+            @page { size: 80mm auto; margin: 0; }
+            body { font-family: monospace; padding: 8px; color: #111; width: 80mm; }
+            .wrap { max-width: 72mm; margin: 0 auto; }
             h1,h2,p { margin: 0; }
             .center { text-align: center; }
             .muted { color: #555; font-size: 12px; }
-            .line { border-top: 1px dashed #999; margin: 12px 0; }
+            .line { border-top: 1px dashed #999; margin: 8px 0; }
             .row { display: flex; justify-content: space-between; gap: 12px; margin: 4px 0; }
-            .total { font-size: 18px; font-weight: bold; }
+            .total { font-size: 16px; font-weight: bold; }
           </style>
         </head>
         <body>
@@ -768,7 +902,7 @@ export default function App() {
     printWindow.print();
   }
 
-  async function getCurrentUserId() {
+async function getCurrentUserId() {
     const { data, error } = await supabase.auth.getUser();
     if (error || !data?.user?.id) return null;
     return data.user.id;
@@ -2507,7 +2641,7 @@ export default function App() {
           }
 
           openReceipt({
-            code: "BALCÃO",
+            code: "BALCAO",
             customer: quickSale.paymentMethod === "Fiado" ? quickSale.fiadoCustomer : "Venda sem comanda",
             paymentMethod: quickSale.paymentMethod,
             total: quickSaleTotal,
