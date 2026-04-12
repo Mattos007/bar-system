@@ -4193,7 +4193,7 @@ async function getCurrentUserId() {
                         >
                           <option>Dinheiro</option>
                           <option>Pix</option>
-                          <option>Cartão</option>
+                          <option>Cartao</option>
                           <option>Dividir</option>
                           <option>Fiado</option>
                         </select>
