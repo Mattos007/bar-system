@@ -669,7 +669,7 @@ export default function App() {
   }, [salesEntriesForCharts]);
 
   const chartPaymentMethods = useMemo(() => {
-    const colors = { Dinheiro: "#22c55e", Pix: "#06b6d4", Cartão: "#8b5cf6", Fiado: "#f59e0b", Dividir: "#ef4444" };
+    const colors = { Dinheiro: "#22c55e", Pix: "#06b6d4", Cartao: "#8b5cf6", Fiado: "#f59e0b", Dividir: "#ef4444" };
     const map = new Map();
 
     salesEntriesForCharts.forEach((entry) => {
@@ -3829,7 +3829,7 @@ async function getCurrentUserId() {
                     >
                       <option>Dinheiro</option>
                       <option>Pix</option>
-                      <option>Cartão</option>
+                      <option>Cartao</option>
                       <option>Fiado</option>
                     </select>
                   </label>
