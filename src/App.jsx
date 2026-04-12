@@ -178,6 +178,160 @@ function PageTab({ label, active, onClick, colorClass, hasAlert = false, icon: I
   );
 }
 
+function MiniLegend({ items = [] }) {
+  return (
+    <div className="mt-4 flex flex-wrap gap-3 text-xs text-slate-600">
+      {items.map((item) => (
+        <div key={item.label} className="inline-flex items-center gap-2 rounded-full bg-slate-50 px-3 py-1.5 ring-1 ring-slate-200">
+          <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: item.color }} />
+          <span>{item.label}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function SimpleBarChart({ data = [], valueKey = "value", labelKey = "label" }) {
+  const max = Math.max(...data.map((item) => Number(item[valueKey] || 0)), 1);
+
+  if (!data.length) {
+    return <div className="rounded-2xl bg-slate-50 p-6 text-sm text-slate-500 ring-1 ring-slate-200">Sem dados para exibir.</div>;
+  }
+
+  return (
+    <div className="grid h-72 grid-cols-1 items-end gap-3 rounded-3xl bg-slate-50 p-4 ring-1 ring-slate-200">
+      <div className="flex h-full items-end justify-between gap-3 overflow-x-auto pb-2">
+        {data.map((item) => {
+          const value = Number(item[valueKey] || 0);
+          const height = Math.max((value / max) * 100, value > 0 ? 8 : 0);
+          return (
+            <div key={item[labelKey]} className="flex min-w-[74px] flex-1 flex-col items-center justify-end gap-2">
+              <span className="text-xs font-bold text-slate-700">{value}</span>
+              <div className="flex h-52 w-full items-end justify-center rounded-t-2xl bg-white px-2 pt-2 ring-1 ring-slate-200">
+                <div
+                  className="w-full rounded-t-2xl bg-indigo-500 transition-all duration-500"
+                  style={{ height: `${height}%` }}
+                />
+              </div>
+              <span className="text-center text-xs font-medium text-slate-500">{item[labelKey]}</span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function SimpleHorizontalBars({ data = [], valueKey = "value", labelKey = "label", formatValue = (value) => value }) {
+  const max = Math.max(...data.map((item) => Number(item[valueKey] || 0)), 1);
+
+  if (!data.length) {
+    return <div className="rounded-2xl bg-slate-50 p-6 text-sm text-slate-500 ring-1 ring-slate-200">Sem dados para exibir.</div>;
+  }
+
+  return (
+    <div className="space-y-3 rounded-3xl bg-slate-50 p-4 ring-1 ring-slate-200">
+      {data.map((item) => {
+        const value = Number(item[valueKey] || 0);
+        const width = Math.max((value / max) * 100, value > 0 ? 8 : 0);
+        return (
+          <div key={item[labelKey]} className="space-y-2">
+            <div className="flex items-center justify-between gap-3 text-sm">
+              <span className="font-medium text-slate-700">{item[labelKey]}</span>
+              <strong className="text-slate-900">{formatValue(value)}</strong>
+            </div>
+            <div className="h-4 overflow-hidden rounded-full bg-white ring-1 ring-slate-200">
+              <div className="h-full rounded-full bg-emerald-500" style={{ width: `${width}%` }} />
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function SimpleLineChart({ data = [], valueKey = "value", labelKey = "label" }) {
+  const width = 560;
+  const height = 220;
+  const padding = 24;
+  const max = Math.max(...data.map((item) => Number(item[valueKey] || 0)), 1);
+
+  if (!data.length) {
+    return <div className="rounded-2xl bg-slate-50 p-6 text-sm text-slate-500 ring-1 ring-slate-200">Sem dados para exibir.</div>;
+  }
+
+  const points = data.map((item, index) => {
+    const x = data.length === 1 ? width / 2 : padding + (index * (width - padding * 2)) / (data.length - 1);
+    const y = height - padding - (Number(item[valueKey] || 0) / max) * (height - padding * 2);
+    return { x, y, label: item[labelKey], value: Number(item[valueKey] || 0) };
+  });
+
+  const path = points.map((point, index) => `${index === 0 ? "M" : "L"}${point.x},${point.y}`).join(" ");
+
+  return (
+    <div className="rounded-3xl bg-slate-50 p-4 ring-1 ring-slate-200">
+      <svg viewBox={`0 0 ${width} ${height}`} className="h-72 w-full">
+        <line x1={padding} y1={height - padding} x2={width - padding} y2={height - padding} stroke="#cbd5e1" strokeWidth="2" />
+        <path d={path} fill="none" stroke="#f59e0b" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round" />
+        {points.map((point) => (
+          <g key={point.label}>
+            <circle cx={point.x} cy={point.y} r="5" fill="#f59e0b" />
+            <text x={point.x} y={point.y - 10} textAnchor="middle" fontSize="11" fill="#334155">{point.value}</text>
+            <text x={point.x} y={height - 6} textAnchor="middle" fontSize="11" fill="#64748b">{point.label}</text>
+          </g>
+        ))}
+      </svg>
+    </div>
+  );
+}
+
+function SimplePieChart({ data = [] }) {
+  const total = data.reduce((sum, item) => sum + Number(item.value || 0), 0);
+  const radius = 70;
+  const cx = 100;
+  const cy = 100;
+
+  if (!data.length || total <= 0) {
+    return <div className="rounded-2xl bg-slate-50 p-6 text-sm text-slate-500 ring-1 ring-slate-200">Sem dados para exibir.</div>;
+  }
+
+  let currentAngle = -Math.PI / 2;
+  const slices = data.map((item) => {
+    const value = Number(item.value || 0);
+    const angle = (value / total) * Math.PI * 2;
+    const startAngle = currentAngle;
+    const endAngle = currentAngle + angle;
+    currentAngle = endAngle;
+
+    const x1 = cx + radius * Math.cos(startAngle);
+    const y1 = cy + radius * Math.sin(startAngle);
+    const x2 = cx + radius * Math.cos(endAngle);
+    const y2 = cy + radius * Math.sin(endAngle);
+    const largeArc = angle > Math.PI ? 1 : 0;
+
+    return {
+      ...item,
+      path: `M ${cx} ${cy} L ${x1} ${y1} A ${radius} ${radius} 0 ${largeArc} 1 ${x2} ${y2} Z`,
+    };
+  });
+
+  return (
+    <div className="grid gap-4 rounded-3xl bg-slate-50 p-4 ring-1 ring-slate-200 md:grid-cols-[220px_1fr] md:items-center">
+      <svg viewBox="0 0 200 200" className="mx-auto h-56 w-56">
+        {slices.map((slice) => (
+          <path key={slice.label} d={slice.path} fill={slice.color} stroke="#ffffff" strokeWidth="2" />
+        ))}
+        <circle cx={cx} cy={cy} r="30" fill="#ffffff" />
+        <text x={cx} y={cy - 4} textAnchor="middle" fontSize="12" fill="#64748b">Total</text>
+        <text x={cx} y={cy + 14} textAnchor="middle" fontSize="14" fontWeight="700" fill="#0f172a">{total}</text>
+      </svg>
+      <div>
+        <MiniLegend items={slices.map((slice) => ({ label: `${slice.label} (${slice.value})`, color: slice.color }))} />
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const [auth, setAuth] = useState({ isAuthenticated: false, user: null });
   const [loginForm, setLoginForm] = useState({ user: "", password: "" });
@@ -193,6 +347,7 @@ export default function App() {
     sinuca: false,
     fiados: false,
     relatorios: false,
+    graficos: false,
     caixa: false,
     movimentos: false,
   });
@@ -473,6 +628,20 @@ export default function App() {
     );
   }, [cashEntries, cashFilterDays, reportDateTime]);
 
+
+  const filteredComandaCashEntries = useMemo(() => {
+    return filteredCashEntries.filter((entry) => {
+      const origin = String(entry.comanda || "");
+      return (
+        entry.entryType === "sale" &&
+        origin &&
+        origin !== "Venda rápida" &&
+        !origin.startsWith("Fiado -") &&
+        !origin.startsWith("Empréstimo -")
+      );
+    });
+  }, [filteredCashEntries]);
+
   const filteredMesaHistory = useMemo(() => {
     const days = Number(mesaFilterDays || 7);
     const baseTs = Date.now();
@@ -483,6 +652,78 @@ export default function App() {
     );
   }, [mesaHistory, mesaFilterDays]);
 
+  const salesEntriesForCharts = useMemo(() => {
+    return filteredCashEntries.filter((entry) => entry.entryType === "sale");
+  }, [filteredCashEntries]);
+
+  const chartSalesByDay = useMemo(() => {
+    const map = new Map();
+
+    salesEntriesForCharts.forEach((entry) => {
+      const date = new Date(entry.rawDate || Date.now());
+      const label = new Intl.DateTimeFormat("pt-BR", { day: "2-digit", month: "2-digit" }).format(date);
+      map.set(label, (map.get(label) || 0) + Number(entry.total || 0));
+    });
+
+    return Array.from(map.entries()).map(([label, value]) => ({ label, value: Number(value.toFixed(2)) }));
+  }, [salesEntriesForCharts]);
+
+  const chartPaymentMethods = useMemo(() => {
+    const colors = { Dinheiro: "#22c55e", Pix: "#06b6d4", Cartão: "#8b5cf6", Fiado: "#f59e0b", Dividir: "#ef4444" };
+    const map = new Map();
+
+    salesEntriesForCharts.forEach((entry) => {
+      const label = entry.method || "Outros";
+      map.set(label, (map.get(label) || 0) + Number(entry.total || 0));
+    });
+
+    return Array.from(map.entries()).map(([label, value]) => ({ label, value: Number(value.toFixed(2)), color: colors[label] || "#64748b" }));
+  }, [salesEntriesForCharts]);
+
+  const chartTopProducts = useMemo(() => {
+    const map = new Map();
+
+    salesEntriesForCharts.forEach((entry) => {
+      (entry.items || []).forEach((item) => {
+        const label = item.name || "Produto";
+        map.set(label, (map.get(label) || 0) + Number(item.quantity || 0));
+      });
+    });
+
+    return Array.from(map.entries())
+      .map(([label, value]) => ({ label, value }))
+      .sort((a, b) => b.value - a.value)
+      .slice(0, 6);
+  }, [salesEntriesForCharts]);
+
+  const chartSalesByHour = useMemo(() => {
+    const map = new Map();
+
+    salesEntriesForCharts.forEach((entry) => {
+      const date = new Date(entry.rawDate || Date.now());
+      const hour = String(date.getHours()).padStart(2, "0") + "h";
+      map.set(hour, (map.get(hour) || 0) + 1);
+    });
+
+    return Array.from(map.entries())
+      .map(([label, value]) => ({ label, value }))
+      .sort((a, b) => Number(a.label.replace("h", "")) - Number(b.label.replace("h", "")));
+  }, [salesEntriesForCharts]);
+
+  const chartStockByCategory = useMemo(() => {
+    const map = new Map();
+
+    products.forEach((product) => {
+      const label = product.category || "Sem categoria";
+      map.set(label, (map.get(label) || 0) + Number(product.stock || 0));
+    });
+
+    return Array.from(map.entries())
+      .map(([label, value]) => ({ label, value }))
+      .sort((a, b) => b.value - a.value)
+      .slice(0, 6);
+  }, [products]);
+
   const tabs = [
     { key: "dashboard", label: "Início", color: "bg-amber-500", icon: CircleDollarSign },
     { key: "comandas", label: "Comandas", color: "bg-sky-600", icon: ClipboardList },
@@ -490,6 +731,7 @@ export default function App() {
     { key: "sinuca", label: "Mesas", color: "bg-violet-600", icon: Gamepad2 },
     { key: "fiados", label: "Fiados", color: "bg-rose-600", icon: Users },
     { key: "relatorios", label: "Relatórios", color: "bg-cyan-600", icon: BarChart3 },
+    { key: "graficos", label: "Gráficos", color: "bg-indigo-600", icon: BarChart3 },
     { key: "caixa", label: "Caixa", color: "bg-slate-800", icon: Wallet },
     { key: "movimentos", label: "Retirada / Empréstimo", color: "bg-fuchsia-600", icon: HandCoins },
   ];
@@ -1188,7 +1430,28 @@ async function getCurrentUserId() {
           total: Number(f.partial_paid || 0) + Number(f.pending || 0),
           pendingTokens: Number(f.pending_tokens || 0),
           tableName: readFiadoMesaMap()[f.id] || "",
-          at: formatDateTime(f.created_at),
+          at: formatDateTime(
+            fiadoHistory
+              .filter((h) => h.fiado_id === f.id && String(h.type || "").toLowerCase().includes("quita"))
+              .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())[0]?.created_at || f.created_at
+          ),
+          products: fiadoItems
+            .filter((i) => i.fiado_id === f.id)
+            .map((i) => ({
+              id: i.id,
+              productId: i.product_id,
+              name: i.name,
+              quantity: Number(i.quantity || 0),
+              price: Number(i.price || 0),
+            })),
+          history: fiadoHistory
+            .filter((h) => h.fiado_id === f.id)
+            .map((h) => ({
+              type: h.type,
+              value: Number(h.value || 0),
+              method: h.method,
+              at: formatDateTime(h.created_at),
+            })),
         }))
     );
 
@@ -3186,6 +3449,55 @@ async function getCurrentUserId() {
     });
   }
 
+  function downloadFiadosQuitadosReport() {
+    const lines = [
+      "RELATÓRIO DE FIADOS QUITADOS",
+      `Gerado em: ${formatDateTime()}`,
+      "",
+    ];
+
+    if (!fiadosQuitados.length) {
+      lines.push("Nenhum fiado quitado ainda.");
+    } else {
+      fiadosQuitados.forEach((fiado, index) => {
+        const products = Array.isArray(fiado.products) ? fiado.products : [];
+        const history = Array.isArray(fiado.history) ? fiado.history : [];
+        lines.push(`Fiado ${index + 1}`);
+        lines.push(`Cliente: ${fiadoDisplayName(fiado)}`);
+        lines.push(`Mesa: ${fiado.tableName || "Nenhuma"}`);
+        lines.push(`Quitado em: ${fiado.at || "-"}`);
+        lines.push(`Total quitado: ${currency(fiado.total || 0)}`);
+        lines.push(`Produtos:`);
+        if (products.length) {
+          products.forEach((item) => {
+            lines.push(`- ${Number(item.quantity || 0)}x ${item.name || "Produto"} = ${currency(Number(item.quantity || 0) * Number(item.price || 0))}`);
+          });
+        } else {
+          lines.push(`- Sem produtos detalhados`);
+        }
+        lines.push(`Histórico:`);
+        if (history.length) {
+          history.forEach((entry) => {
+            lines.push(`- ${entry.type || "Lançamento"} | ${entry.at || "-"} | ${entry.method || "-"} | ${currency(entry.value || 0)}`);
+          });
+        } else {
+          lines.push(`- Sem histórico de lançamentos`);
+        }
+        lines.push("");
+      });
+    }
+
+    const blob = new Blob([lines.join("\n")], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "relatorio-fiados-quitados.txt";
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  }
+
   function downloadCashReport() {
     const lines = filteredCashEntries.map((entry, index) => {
       const itemsText =
@@ -4172,10 +4484,48 @@ async function getCurrentUserId() {
                         <div className="min-w-0">
                           <p className="break-words font-semibold">{fiadoDisplayName(fiado)}</p>
                           <p className="text-sm text-slate-500">
-                            Fichas: {fiado.pendingTokens} • Pago parcial: {currency(fiado.partialPaid)}
+                            Fichas: {fiado.pendingTokens} • Pago parcial: {currency(fiado.partialPaid)} • Mesa: {fiado.tableName || "Nenhuma"}
                           </p>
                         </div>
                         <p className="text-lg font-black text-amber-600">{currency(fiado.pending)}</p>
+                      </div>
+
+                      <div className="mt-3 rounded-2xl bg-white p-3 ring-1 ring-slate-200">
+                        <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Detalhe dos lançamentos</p>
+                        <div className="mt-2 grid gap-3 lg:grid-cols-2">
+                          <div className="rounded-2xl bg-slate-50 p-3 ring-1 ring-slate-200">
+                            <p className="text-sm font-semibold text-slate-800">Produtos lançados</p>
+                            <div className="mt-2 space-y-2 text-sm text-slate-600">
+                              {(Array.isArray(fiado.products) ? fiado.products : []).length > 0 ? (
+                                (Array.isArray(fiado.products) ? fiado.products : []).map((item) => (
+                                  <div key={item.id || `${fiado.id}-${item.name}`} className="flex items-center justify-between gap-3 rounded-2xl bg-white px-3 py-2 ring-1 ring-slate-200">
+                                    <span className="break-words">{item.quantity}x {item.name}</span>
+                                    <strong>{currency(Number(item.quantity || 0) * Number(item.price || 0))}</strong>
+                                  </div>
+                                ))
+                              ) : (
+                                <p className="text-sm text-slate-500">Sem produtos detalhados.</p>
+                              )}
+                            </div>
+                          </div>
+
+                          <div className="rounded-2xl bg-slate-50 p-3 ring-1 ring-slate-200">
+                            <p className="text-sm font-semibold text-slate-800">Histórico</p>
+                            <div className="mt-2 space-y-2 text-sm text-slate-600">
+                              {(Array.isArray(fiado.history) ? fiado.history : []).length > 0 ? (
+                                (Array.isArray(fiado.history) ? fiado.history : []).map((entry, index) => (
+                                  <div key={`${fiado.id}-${entry.at}-${index}`} className="rounded-2xl bg-white px-3 py-2 ring-1 ring-slate-200">
+                                    <p className="font-medium text-slate-800">{entry.type}</p>
+                                    <p className="text-xs text-slate-500">{entry.at} • {entry.method}</p>
+                                    <p className="mt-1 font-semibold text-slate-700">{currency(entry.value)}</p>
+                                  </div>
+                                ))
+                              ) : (
+                                <p className="text-sm text-slate-500">Sem histórico de lançamentos.</p>
+                              )}
+                            </div>
+                          </div>
+                        </div>
                       </div>
 
                       <div className="mt-3 grid gap-3 sm:grid-cols-[1fr_auto_auto]">
@@ -4203,7 +4553,7 @@ async function getCurrentUserId() {
               </div>
             </Section>
 
-            <Section title="Fiados quitados" subtitle={`Total quitado: ${currency(totalFiadoPaid)}`}>
+            <Section title="Fiados quitados" subtitle={`Total quitado: ${currency(totalFiadoPaid)}`} action={<ActionButton onClick={downloadFiadosQuitadosReport} variant="light"><span className="inline-flex items-center gap-2"><Download size={16} /> Baixar relatório</span></ActionButton>}>
               <div className="max-h-[32rem] overflow-y-auto pr-1 space-y-3">
                 {fiadosQuitados.length === 0 ? (
                   <div className="rounded-2xl bg-slate-50 p-4 text-sm text-slate-500 ring-1 ring-slate-200">
@@ -4212,12 +4562,50 @@ async function getCurrentUserId() {
                 ) : (
                   fiadosQuitados.map((fiado) => (
                     <div key={fiado.id} className="rounded-2xl bg-slate-50 p-4 ring-1 ring-slate-200">
-                      <div className="flex items-center justify-between gap-3">
+                      <div className="flex flex-wrap items-center justify-between gap-3">
                         <div>
                           <p className="font-semibold">{fiadoDisplayName(fiado)}</p>
-                          <p className="text-sm text-slate-500">Quitado em {fiado.at}</p>
+                          <p className="text-sm text-slate-500">Quitado em {fiado.at} • Mesa: {fiado.tableName || "Nenhuma"}</p>
                         </div>
                         <strong className="text-emerald-700">{currency(fiado.total)}</strong>
+                      </div>
+
+                      <div className="mt-3 rounded-2xl bg-white p-3 ring-1 ring-slate-200">
+                        <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Detalhe do quitado</p>
+                        <div className="mt-2 grid gap-3 lg:grid-cols-2">
+                          <div className="rounded-2xl bg-slate-50 p-3 ring-1 ring-slate-200">
+                            <p className="text-sm font-semibold text-slate-800">Produtos lançados</p>
+                            <div className="mt-2 space-y-2 text-sm text-slate-600">
+                              {(Array.isArray(fiado.products) ? fiado.products : []).length > 0 ? (
+                                (Array.isArray(fiado.products) ? fiado.products : []).map((item) => (
+                                  <div key={item.id || `${fiado.id}-${item.name}`} className="flex items-center justify-between gap-3 rounded-2xl bg-white px-3 py-2 ring-1 ring-slate-200">
+                                    <span className="break-words">{item.quantity}x {item.name}</span>
+                                    <strong>{currency(Number(item.quantity || 0) * Number(item.price || 0))}</strong>
+                                  </div>
+                                ))
+                              ) : (
+                                <p className="text-sm text-slate-500">Sem produtos detalhados.</p>
+                              )}
+                            </div>
+                          </div>
+
+                          <div className="rounded-2xl bg-slate-50 p-3 ring-1 ring-slate-200">
+                            <p className="text-sm font-semibold text-slate-800">Histórico</p>
+                            <div className="mt-2 space-y-2 text-sm text-slate-600">
+                              {(Array.isArray(fiado.history) ? fiado.history : []).length > 0 ? (
+                                (Array.isArray(fiado.history) ? fiado.history : []).map((entry, index) => (
+                                  <div key={`${fiado.id}-${entry.at}-${index}`} className="rounded-2xl bg-white px-3 py-2 ring-1 ring-slate-200">
+                                    <p className="font-medium text-slate-800">{entry.type}</p>
+                                    <p className="text-xs text-slate-500">{entry.at} • {entry.method}</p>
+                                    <p className="mt-1 font-semibold text-slate-700">{currency(entry.value)}</p>
+                                  </div>
+                                ))
+                              ) : (
+                                <p className="text-sm text-slate-500">Sem histórico de lançamentos.</p>
+                              )}
+                            </div>
+                          </div>
+                        </div>
                       </div>
                     </div>
                   ))
@@ -4261,6 +4649,109 @@ async function getCurrentUserId() {
               </div>
             </div>
           </Section>
+        )}
+
+        {activePage === "graficos" && (
+          <div className="grid gap-6">
+            <Section
+              title="Gráficos"
+              subtitle="Visualização em barras, pizza e linha com base nas vendas e estoque da versão atual."
+              action={
+                <div className="rounded-2xl bg-slate-50 px-4 py-3 text-sm text-slate-600 ring-1 ring-slate-200">
+                  Base atual: últimos <strong>{cashFilterDays}</strong> dias do caixa 1
+                </div>
+              }
+            >
+              <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+                <StatCard
+                  title="Vendas no período"
+                  value={String(salesEntriesForCharts.length)}
+                  subtitle="Somente lançamentos de venda"
+                  icon={Receipt}
+                />
+                <StatCard
+                  title="Faturamento"
+                  value={currency(salesEntriesForCharts.reduce((sum, item) => sum + Number(item.total || 0), 0))}
+                  subtitle="Total somado para os gráficos"
+                  icon={CircleDollarSign}
+                />
+                <StatCard
+                  title="Produto líder"
+                  value={chartTopProducts[0]?.label || "-"}
+                  subtitle={chartTopProducts[0] ? `${chartTopProducts[0].value} unidades` : "Sem vendas"}
+                  icon={Package}
+                />
+                <StatCard
+                  title="Pico por horário"
+                  value={chartSalesByHour.slice().sort((a, b) => b.value - a.value)[0]?.label || "-"}
+                  subtitle={chartSalesByHour.slice().sort((a, b) => b.value - a.value)[0] ? `${chartSalesByHour.slice().sort((a, b) => b.value - a.value)[0].value} vendas` : "Sem movimento"}
+                  icon={BarChart3}
+                />
+              </div>
+
+              <div className="mt-6 grid gap-6 xl:grid-cols-2">
+                <div className="space-y-3">
+                  <div className="flex items-center gap-2 text-slate-800">
+                    <BarChart3 size={18} />
+                    <p className="font-semibold">Gráfico de barras · vendas por dia</p>
+                  </div>
+                  <SimpleBarChart
+                    data={chartSalesByDay}
+                    valueKey="value"
+                    labelKey="label"
+                  />
+                </div>
+
+                <div className="space-y-3">
+                  <div className="flex items-center gap-2 text-slate-800">
+                    <CircleDollarSign size={18} />
+                    <p className="font-semibold">Gráfico de pizza · formas de pagamento</p>
+                  </div>
+                  <SimplePieChart
+                    data={chartPaymentMethods}
+                  />
+                </div>
+
+                <div className="space-y-3">
+                  <div className="flex items-center gap-2 text-slate-800">
+                    <Package size={18} />
+                    <p className="font-semibold">Barras horizontais · produtos mais vendidos</p>
+                  </div>
+                  <SimpleHorizontalBars
+                    data={chartTopProducts}
+                    valueKey="value"
+                    labelKey="label"
+                    formatValue={(value) => `${value} un.`}
+                  />
+                </div>
+
+                <div className="space-y-3">
+                  <div className="flex items-center gap-2 text-slate-800">
+                    <BarChart3 size={18} />
+                    <p className="font-semibold">Gráfico de linha · movimento por horário</p>
+                  </div>
+                  <SimpleLineChart
+                    data={chartSalesByHour}
+                    valueKey="value"
+                    labelKey="label"
+                  />
+                </div>
+              </div>
+
+              <div className="mt-6 space-y-3">
+                <div className="flex items-center gap-2 text-slate-800">
+                  <Package size={18} />
+                  <p className="font-semibold">Barras horizontais · estoque por categoria</p>
+                </div>
+                <SimpleHorizontalBars
+                  data={chartStockByCategory}
+                  valueKey="value"
+                  labelKey="label"
+                  formatValue={(value) => `${value} un.`}
+                />
+              </div>
+            </Section>
+          </div>
         )}
 
         {activePage === "caixa" && (
@@ -4323,6 +4814,52 @@ async function getCurrentUserId() {
                   <p className="mt-1 text-sm font-semibold">
                     {reportDateTime ? formatDateTime(new Date(reportDateTime)) : formatDateTime()}
                   </p>
+                </div>
+              </div>
+
+              <div className="mt-4 rounded-2xl bg-sky-50 p-4 ring-1 ring-sky-200">
+                <div className="mb-3 flex items-center justify-between gap-3">
+                  <div>
+                    <p className="font-semibold text-sky-900">Lançamentos de comandas</p>
+                    <p className="text-sm text-sky-700">Fechamentos de comandas lançados no Caixa 1 dentro do filtro atual.</p>
+                  </div>
+                  <div className="rounded-2xl bg-white px-3 py-2 text-sm font-semibold text-sky-900 ring-1 ring-sky-200">
+                    {filteredComandaCashEntries.length} lançamento(s)
+                  </div>
+                </div>
+                <div className="max-h-56 space-y-2 overflow-y-auto pr-1">
+                  {filteredComandaCashEntries.length === 0 ? (
+                    <div className="rounded-2xl bg-white p-4 text-sm text-slate-500 ring-1 ring-slate-200">
+                      Nenhum fechamento de comanda encontrado no período.
+                    </div>
+                  ) : (
+                    filteredComandaCashEntries.map((entry) => (
+                      <div key={`comanda-${entry.id}`} className="rounded-2xl bg-white px-4 py-3 ring-1 ring-sky-200">
+                        <div className="flex flex-wrap items-center justify-between gap-3 text-sm">
+                          <div className="min-w-0">
+                            <p className="font-semibold text-slate-900">{entry.comanda}</p>
+                            <p className="text-slate-500">{entry.at} • {entry.method}</p>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <strong className="text-sky-900">{currency(entry.total)}</strong>
+                            <button
+                              type="button"
+                              onClick={() => removeCashEntry(entry)}
+                              className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-white text-rose-600 ring-1 ring-slate-200 transition hover:bg-rose-50"
+                              title="Excluir lançamento da comanda"
+                            >
+                              <X size={16} />
+                            </button>
+                          </div>
+                        </div>
+                        <p className="mt-2 break-words text-xs text-slate-500">
+                          {(entry.items || []).length > 0
+                            ? entry.items.map((item) => `${item.quantity}x ${item.name}`).join(" • ")
+                            : entry.description || "Sem itens detalhados"}
+                        </p>
+                      </div>
+                    ))
+                  )}
                 </div>
               </div>
 
