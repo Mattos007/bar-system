@@ -191,7 +191,7 @@ function MiniLegend({ items = [] }) {
   );
 }
 
-function SimpleBarChart({ data = [], valueKey = "value", labelKey = "label" }) {
+function SimpleBarChart({ data = [], valueKey = "value", labelKey = "label", valueFormatter = (value) => value }) {
   const max = Math.max(...data.map((item) => Number(item[valueKey] || 0)), 1);
 
   if (!data.length) {
@@ -199,21 +199,26 @@ function SimpleBarChart({ data = [], valueKey = "value", labelKey = "label" }) {
   }
 
   return (
-    <div className="grid h-72 grid-cols-1 items-end gap-3 rounded-3xl bg-slate-50 p-4 ring-1 ring-slate-200">
-      <div className="flex h-full items-end justify-between gap-3 overflow-x-auto pb-2">
+    <div className="rounded-3xl bg-slate-50 p-3 ring-1 ring-slate-200 sm:p-4">
+      <div className="flex h-[19rem] items-end justify-between gap-2 pt-6">
         {data.map((item) => {
           const value = Number(item[valueKey] || 0);
           const height = Math.max((value / max) * 100, value > 0 ? 8 : 0);
+
           return (
-            <div key={item[labelKey]} className="flex min-w-[74px] flex-1 flex-col items-center justify-end gap-2">
-              <span className="text-xs font-bold text-slate-700">{value}</span>
-              <div className="flex h-52 w-full items-end justify-center rounded-t-2xl bg-white px-2 pt-2 ring-1 ring-slate-200">
+            <div key={item[labelKey]} className="flex min-w-0 flex-1 flex-col items-center justify-end gap-2">
+              <span className="max-w-full truncate text-[10px] font-bold text-slate-700 sm:text-xs">
+                {valueFormatter(value)}
+              </span>
+              <div className="flex h-52 w-full items-end justify-center rounded-t-2xl bg-white px-1 pt-2 ring-1 ring-slate-200 sm:px-2">
                 <div
                   className="w-full rounded-t-2xl bg-indigo-500 transition-all duration-500"
                   style={{ height: `${height}%` }}
                 />
               </div>
-              <span className="text-center text-xs font-medium text-slate-500">{item[labelKey]}</span>
+              <span className="w-full break-words px-1 text-center text-[10px] font-medium leading-tight text-slate-500 sm:text-xs">
+                {item[labelKey]}
+              </span>
             </div>
           );
         })}
@@ -669,16 +674,63 @@ export default function App() {
   }, [salesEntriesForCharts]);
 
   const chartPaymentMethods = useMemo(() => {
-    const colors = { Dinheiro: "#22c55e", Pix: "#06b6d4", Cartao: "#8b5cf6", Fiado: "#f59e0b", Dividir: "#ef4444" };
+    const colors = {
+      Dinheiro: "#22c55e",
+      Pix: "#06b6d4",
+      Cartão: "#8b5cf6",
+      Fiado: "#f59e0b",
+      Empréstimo: "#ec4899",
+      Dividir: "#ef4444",
+    };
     const map = new Map();
 
-    salesEntriesForCharts.forEach((entry) => {
-      const label = entry.method || "Outros";
+    const normalizePaymentMethod = (value, entryType = "") => {
+      const raw = String(value || "Outros").trim();
+      const normalized = raw
+        .toLowerCase()
+        .normalize("NFD")
+        .replace(/[̀-ͯ]/g, "");
+
+      if (entryType === "loan") return "Empréstimo";
+      if (entryType === "loan-payment") return "Empréstimo";
+
+      if (
+        [
+          "cartao",
+          "credito",
+          "debito",
+          "credito/debito",
+          "credito / debito",
+        ].includes(normalized)
+      ) {
+        return "Cartão";
+      }
+
+      if (
+        [
+          "quitacao total",
+          "pagamento parcial fiado",
+          "fiado",
+          "quitacao fiado",
+        ].includes(normalized)
+      ) {
+        return "Fiado";
+      }
+
+      return raw || "Outros";
+    };
+
+    filteredCashEntries.forEach((entry) => {
+      const label = normalizePaymentMethod(entry.method, entry.entryType);
       map.set(label, (map.get(label) || 0) + Number(entry.total || 0));
     });
 
-    return Array.from(map.entries()).map(([label, value]) => ({ label, value: Number(value.toFixed(2)), color: colors[label] || "#64748b" }));
-  }, [salesEntriesForCharts]);
+    return Array.from(map.entries()).map(([label, value]) => ({
+      label,
+      value: Number(value.toFixed(2)),
+      color: colors[label] || "#64748b",
+    }));
+  }, [filteredCashEntries]);
 
   const chartTopProducts = useMemo(() => {
     const map = new Map();
@@ -4699,6 +4751,7 @@ async function getCurrentUserId() {
                     data={chartSalesByDay}
                     valueKey="value"
                     labelKey="label"
+                    valueFormatter={(value) => currency(value)}
                   />
                 </div>
 
@@ -4715,13 +4768,13 @@ async function getCurrentUserId() {
                 <div className="space-y-3">
                   <div className="flex items-center gap-2 text-slate-800">
                     <Package size={18} />
-                    <p className="font-semibold">Barras horizontais · produtos mais vendidos</p>
+                    <p className="font-semibold">Gráfico de barras · produtos mais vendidos</p>
                   </div>
-                  <SimpleHorizontalBars
+                  <SimpleBarChart
                     data={chartTopProducts}
                     valueKey="value"
                     labelKey="label"
-                    formatValue={(value) => `${value} un.`}
+                    valueFormatter={(value) => `${value} un.`}
                   />
                 </div>
 
