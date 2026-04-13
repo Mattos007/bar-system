@@ -680,8 +680,8 @@ export default function App() {
       Cartão: "#8b5cf6",
       Fiado: "#f59e0b",
       Empréstimo: "#ec4899",
-      Dividir: "#ef4444",
     };
+    const allowedLabels = ["Dinheiro", "Pix", "Cartão", "Fiado", "Empréstimo"];
     const map = new Map();
 
     const normalizePaymentMethod = (value, entryType = "") => {
@@ -691,7 +691,6 @@ export default function App() {
         .normalize("NFD")
         .replace(/[̀-ͯ]/g, "");
 
-      if (entryType === "loan") return "Empréstimo";
       if (entryType === "loan-payment") return "Empréstimo";
 
       if (
@@ -705,6 +704,9 @@ export default function App() {
       ) {
         return "Cartão";
       }
+
+      if (["dinheiro"].includes(normalized)) return "Dinheiro";
+      if (["pix"].includes(normalized)) return "Pix";
 
       if (
         [
@@ -721,15 +723,22 @@ export default function App() {
     };
 
     filteredCashEntries.forEach((entry) => {
+      const value = Number(entry.total || 0);
+      if (value <= 0) return;
+
       const label = normalizePaymentMethod(entry.method, entry.entryType);
-      map.set(label, (map.get(label) || 0) + Number(entry.total || 0));
+      if (!allowedLabels.includes(label)) return;
+
+      map.set(label, (map.get(label) || 0) + value);
     });
 
-    return Array.from(map.entries()).map(([label, value]) => ({
-      label,
-      value: Number(value.toFixed(2)),
-      color: colors[label] || "#64748b",
-    }));
+    return allowedLabels
+      .map((label) => ({
+        label,
+        value: Number((map.get(label) || 0).toFixed(2)),
+        color: colors[label],
+      }))
+      .filter((item) => item.value > 0);
   }, [filteredCashEntries]);
 
   const chartTopProducts = useMemo(() => {
