@@ -588,14 +588,15 @@ export default function App() {
     [products]
   );
 
-  const topBeverages = useMemo(
+  const estimatedInventoryValue = useMemo(
     () =>
-      [...products]
-        .filter((item) => String(item.category || "").toLowerCase() === "bebidas")
-        .sort((a, b) => Number(b.sold || 0) - Number(a.sold || 0))
-        .slice(0, 5),
+      products.reduce(
+        (sum, item) => sum + Number(item.stock || 0) * Number(item.price || 0),
+        0
+      ),
     [products]
   );
+
 
   const quickSaleTotal = useMemo(
     () => quickSaleItems.reduce((sum, item) => sum + Number(item.price) * Number(item.quantity), 0),
@@ -1354,9 +1355,23 @@ async function getCurrentUserId() {
   }), [fiados]);
 
   const mesaOverdueStats = useMemo(() => ({
-    mesa1: { tokens: Number(mesa1.overdueTokens || 0), total: Number(mesa1.overdueValue || 0) },
-    mesa2: { tokens: Number(mesa2.overdueTokens || 0), total: Number(mesa2.overdueValue || 0) },
-  }), [mesa1.overdueTokens, mesa1.overdueValue, mesa2.overdueTokens, mesa2.overdueValue]);
+    mesa1: fiados.reduce((acc, item) => {
+      const status = String(item.status || "").trim();
+      if (item.tableName !== "Mesa 1" || status !== "Fiado vencido") return acc;
+      const tokens = Number(item.pendingTokens || 0);
+      acc.tokens += tokens;
+      acc.total += tokens * fichaPrice;
+      return acc;
+    }, { tokens: 0, total: 0 }),
+    mesa2: fiados.reduce((acc, item) => {
+      const status = String(item.status || "").trim();
+      if (item.tableName !== "Mesa 2" || status !== "Fiado vencido") return acc;
+      const tokens = Number(item.pendingTokens || 0);
+      acc.tokens += tokens;
+      acc.total += tokens * fichaPrice;
+      return acc;
+    }, { tokens: 0, total: 0 }),
+  }), [fiados]);
 
   async function loadProducts() {
     setProductsLoading(true);
@@ -2326,103 +2341,222 @@ async function getCurrentUserId() {
     });
   }
 
+  function normalizeMesaState(state = {}) {
+    return {
+      ...defaultMesaState,
+      ...state,
+      total: Number(state?.total || 0),
+      paid: Number(state?.paid || 0),
+      paidValue: Number(state?.paidValue || 0),
+      pending: Number(state?.pending || 0),
+      unpaidTokens: Number(state?.unpaidTokens || 0),
+      unpaidValue: Number(state?.unpaidValue || 0),
+      overdueTokens: Number(state?.overdueTokens || 0),
+      overdueValue: Number(state?.overdueValue || 0),
+      overduePaidTokens: Number(state?.overduePaidTokens || 0),
+      overduePaidValue: Number(state?.overduePaidValue || 0),
+      open: Boolean(state?.open),
+    };
+  }
+
+  function getMesaStateByName(table) {
+    return normalizeMesaState(table === "Mesa 1" ? mesa1 : mesa2);
+  }
+
+  async function saveMesaState(table, nextState) {
+    const normalized = normalizeMesaState(nextState);
+
+    if (table === "Mesa 1") setMesa1(normalized);
+    if (table === "Mesa 2") setMesa2(normalized);
+
+    await persistMesa(table, normalized);
+    return normalized;
+  }
+
+  function mesaHasOperationalBalance(state) {
+    const current = normalizeMesaState(state);
+    return (
+      current.total > 0 ||
+      current.pending > 0 ||
+      current.paid > 0 ||
+      current.open
+    );
+  }
+
+  function isFiadoLinkedToTable(item, table) {
+    const map = readFiadoMesaMap();
+    return map[item.id] === table || String(item.tableName || "").trim() === table;
+  }
+
+  function getMesaLinkedFiadoStats(table, sourceFiados = fiados) {
+    return (sourceFiados || []).reduce(
+      (acc, item) => {
+        const status = String(item.status || "").trim();
+        if (!isFiadoLinkedToTable(item, table)) return acc;
+        if (status === "Quitado" || status === "Fiado vencido") return acc;
+
+        const tokens = Math.max(0, Number(item.pendingTokens || 0));
+        if (!tokens) return acc;
+
+        acc.tokens += tokens;
+        acc.value += tokens * fichaPrice;
+        return acc;
+      },
+      { tokens: 0, value: 0 }
+    );
+  }
+
+  function getMesaOverdueFiadoStats(table, sourceFiados = fiados) {
+    return (sourceFiados || []).reduce(
+      (acc, item) => {
+        const status = String(item.status || "").trim();
+        if (!isFiadoLinkedToTable(item, table)) return acc;
+        if (status !== "Fiado vencido") return acc;
+
+        const tokens = Math.max(0, Number(item.pendingTokens || 0));
+        if (!tokens) return acc;
+
+        acc.tokens += tokens;
+        acc.value += tokens * fichaPrice;
+        return acc;
+      },
+      { tokens: 0, value: 0 }
+    );
+  }
+
+  async function markMesaFiadosAsOverdue(table) {
+    const userId = await getCurrentUserId();
+
+    const linkedToConvert = fiados.filter((item) => {
+      const status = String(item.status || "").trim();
+      return (
+        isFiadoLinkedToTable(item, table) &&
+        Number(item.pendingTokens || 0) > 0 &&
+        status !== "Quitado" &&
+        status !== "Fiado vencido"
+      );
+    });
+
+    if (!linkedToConvert.length) {
+      return { tokens: 0, value: 0 };
+    }
+
+    for (const item of linkedToConvert) {
+      await supabase
+        .from("fiados")
+        .update({ status: "Fiado vencido" })
+        .eq("id", item.id)
+        .eq("user_id", userId);
+    }
+
+    const updatedFiados = fiados.map((item) =>
+      linkedToConvert.some((linked) => linked.id === item.id)
+        ? { ...item, status: "Fiado vencido", tableName: table }
+        : item
+    );
+
+    setFiados(updatedFiados);
+
+    const overdueStats = getMesaOverdueFiadoStats(table, updatedFiados);
+    const currentMesa = getMesaStateByName(table);
+    await saveMesaState(table, {
+      ...currentMesa,
+      overdueTokens: overdueStats.tokens,
+      overdueValue: overdueStats.value,
+    });
+
+    return linkedToConvert.reduce(
+      (acc, item) => {
+        const tokens = Math.max(0, Number(item.pendingTokens || 0));
+        acc.tokens += tokens;
+        acc.value += tokens * fichaPrice;
+        return acc;
+      },
+      { tokens: 0, value: 0 }
+    );
+  }
+
   async function applyTablePayment(table, tokenQuantity) {
-    if (!tokenQuantity || table === "Nenhuma") return;
+    const qty = Math.max(0, Number(tokenQuantity || 0));
+    if (!qty || table === "Nenhuma") return;
 
-    if (table === "Mesa 1") {
-      const next = {
-        ...mesa1,
-        paid: Number(mesa1.paid || 0) + tokenQuantity,
-        paidValue: Number(mesa1.paidValue || (Number(mesa1.paid || 0) * fichaPrice)) + tokenQuantity * fichaPrice,
-        pending: Math.max(0, Number(mesa1.pending || 0) - tokenQuantity),
-        open: Math.max(0, Number(mesa1.pending || 0) - tokenQuantity) > 0,
-      };
-      setMesa1(next);
-      await persistMesa("Mesa 1", next);
-      await addMesaHistoryEntry({
-        mesa: "Mesa 1",
-        action: next.pending === 0 ? "Mesa quitada por pagamento" : "Pagamento de fichas",
-        total: next.total,
-        paid: next.paid,
-        pending: next.pending,
-        tokenQuantity,
-        value: tokenQuantity * fichaPrice,
-        details: next.pending === 0 ? `${tokenQuantity} ficha(s) paga(s). Mesa quitada.` : `${tokenQuantity} ficha(s) paga(s).`,
-      });
-    }
+    const current = getMesaStateByName(table);
+    const paidTokens = Math.min(qty, current.pending);
+    if (!paidTokens) return;
 
-    if (table === "Mesa 2") {
-      const next = {
-        ...mesa2,
-        paid: Number(mesa2.paid || 0) + tokenQuantity,
-        paidValue: Number(mesa2.paidValue || (Number(mesa2.paid || 0) * fichaPrice)) + tokenQuantity * fichaPrice,
-        pending: Math.max(0, Number(mesa2.pending || 0) - tokenQuantity),
-        open: Math.max(0, Number(mesa2.pending || 0) - tokenQuantity) > 0,
-      };
-      setMesa2(next);
-      await persistMesa("Mesa 2", next);
-      await addMesaHistoryEntry({
-        mesa: "Mesa 2",
-        action: next.pending === 0 ? "Mesa quitada por pagamento" : "Pagamento de fichas",
-        total: next.total,
-        paid: next.paid,
-        pending: next.pending,
-        tokenQuantity,
-        value: tokenQuantity * fichaPrice,
-        details: next.pending === 0 ? `${tokenQuantity} ficha(s) paga(s). Mesa quitada.` : `${tokenQuantity} ficha(s) paga(s).`,
-      });
-    }
+    const paidValue = paidTokens * fichaPrice;
+    const nextPending = Math.max(0, current.pending - paidTokens);
+
+    const next = await saveMesaState(table, {
+      ...current,
+      paid: current.paid + paidTokens,
+      paidValue: current.paidValue + paidValue,
+      pending: nextPending,
+      open: nextPending > 0,
+    });
+
+    await addMesaHistoryEntry({
+      mesa: table,
+      action: next.pending === 0 ? "Mesa quitada por pagamento" : "Pagamento de fichas",
+      total: next.total,
+      paid: next.paid,
+      pending: next.pending,
+      tokenQuantity: paidTokens,
+      value: paidValue,
+      details:
+        next.pending === 0
+          ? `${paidTokens} ficha(s) paga(s). Mesa quitada.`
+          : `${paidTokens} ficha(s) paga(s).`,
+    });
   }
 
   async function moveTableTokensToFiado(table, tokenQuantity) {
-    if (!tokenQuantity || table === "Nenhuma") return;
+    const qty = Math.max(0, Number(tokenQuantity || 0));
+    if (!qty || table === "Nenhuma") return;
 
-    const current = table === "Mesa 1" ? mesa1 : mesa2;
-    const nextPending = Math.max(0, Number(current.pending || 0) - Number(tokenQuantity || 0));
-    const next = {
+    const current = getMesaStateByName(table);
+    const movedTokens = Math.min(qty, current.pending);
+    if (!movedTokens) return;
+
+    const nextPending = Math.max(0, current.pending - movedTokens);
+
+    const next = await saveMesaState(table, {
       ...current,
       pending: nextPending,
       open: nextPending > 0,
-    };
+    });
 
-    if (table === "Mesa 1") setMesa1(next);
-    else setMesa2(next);
-
-    await persistMesa(table, next);
     await addMesaHistoryEntry({
       mesa: table,
       action: "Fichas lançadas em fiado",
       total: next.total,
       paid: next.paid,
       pending: next.pending,
-      tokenQuantity,
-      value: Number(tokenQuantity || 0) * fichaPrice,
-      details: `${tokenQuantity} ficha(s) saiu(ram) das pendências da mesa e foi(ram) lançada(s) em fiado. O valor só entra em fichas pagas quando o fiado for quitado.`,
+      tokenQuantity: movedTokens,
+      value: movedTokens * fichaPrice,
+      details: `${movedTokens} ficha(s) saiu(ram) das pendências da mesa e foi(ram) lançada(s) em fiado. O valor só entra em fichas pagas quando o fiado for quitado.`,
     });
   }
 
   async function applyDirectTokenPaymentToMesa(table, tokenQuantity) {
-    if (!tokenQuantity || table === "Nenhuma") return;
+    const qty = Math.max(0, Number(tokenQuantity || 0));
+    if (!qty || table === "Nenhuma") return;
 
-    const current = table === "Mesa 1" ? mesa1 : mesa2;
-    const paidTokens = Math.min(Number(tokenQuantity || 0), Number(current.pending || 0));
-
-    if (paidTokens <= 0) return;
+    const current = getMesaStateByName(table);
+    const paidTokens = Math.min(qty, current.pending);
+    if (!paidTokens) return;
 
     const paidValue = paidTokens * fichaPrice;
-    const nextPending = Math.max(0, Number(current.pending || 0) - paidTokens);
-    const next = {
+    const nextPending = Math.max(0, current.pending - paidTokens);
+
+    const next = await saveMesaState(table, {
       ...current,
       pending: nextPending,
-      paid: Number(current.paid || 0) + paidTokens,
-      paidValue: Number(current.paidValue || (Number(current.paid || 0) * fichaPrice)) + paidValue,
+      paid: current.paid + paidTokens,
+      paidValue: current.paidValue + paidValue,
       open: nextPending > 0,
-    };
+    });
 
-    if (table === "Mesa 1") setMesa1(next);
-    else setMesa2(next);
-
-    await persistMesa(table, next);
     await addMesaHistoryEntry({
       mesa: table,
       action: "Pagamento direto de fichas na comanda",
@@ -2445,23 +2579,14 @@ async function getCurrentUserId() {
       requirePassword: true,
       onConfirm: async () => {
         const mesaNome = tableKey === "mesa1" ? "Mesa 1" : "Mesa 2";
-        const mesaAtual = tableKey === "mesa1" ? mesa1 : mesa2;
-        const next = {
-          ...mesaAtual,
-          total: Number(mesaAtual.total || 0) + qty,
-          paid: Number(mesaAtual.paid || 0),
-          paidValue: Number(mesaAtual.paidValue || (Number(mesaAtual.paid || 0) * fichaPrice)),
-          pending: Number(mesaAtual.pending || 0) + qty,
-          open: true,
-        };
+        const current = getMesaStateByName(mesaNome);
 
-        if (tableKey === "mesa1") {
-          setMesa1(next);
-          await persistMesa("Mesa 1", next);
-        } else {
-          setMesa2(next);
-          await persistMesa("Mesa 2", next);
-        }
+        const next = await saveMesaState(mesaNome, {
+          ...current,
+          total: current.total + qty,
+          pending: current.pending + qty,
+          open: true,
+        });
 
         await addMesaHistoryEntry({
           mesa: mesaNome,
@@ -2480,85 +2605,77 @@ async function getCurrentUserId() {
     });
   }
 
-  function getMesaLinkedFiadoStats(table) {
-    const map = readFiadoMesaMap();
-    return fiados.reduce(
-      (acc, item) => {
-        if (map[item.id] !== table || item.status === "Quitado") return acc;
-        const tokens = Number(item.pendingTokens || 0);
-        if (tokens <= 0) return acc;
-        acc.tokens += tokens;
-        acc.value += tokens * fichaPrice;
-        return acc;
-      },
-      { tokens: 0, value: 0 }
-    );
-  }
-
-  async function markMesaFiadosAsOverdue(table) {
-    const userId = await getCurrentUserId();
-    const map = readFiadoMesaMap();
-    const linked = fiados.filter((item) => map[item.id] === table && Number(item.pendingTokens || 0) > 0 && item.status !== "Quitado");
-    for (const item of linked) {
-      await supabase.from("fiados").update({ status: "Fiado vencido" }).eq("id", item.id).eq("user_id", userId);
-    }
-    return linked.reduce((acc, item) => {
-      acc.tokens += Number(item.pendingTokens || 0);
-      acc.value += Number(item.pendingTokens || 0) * fichaPrice;
-      return acc;
-    }, { tokens: 0, value: 0 });
-  }
-
   async function applyFiadoTokenPaymentToMesa(table, fiado, paymentValue, settleAll = false) {
     if (!table || !fiado) return;
 
-    const current = table === "Mesa 1" ? mesa1 : mesa2;
+    const current = getMesaStateByName(table);
     const currentPendingTokens = Math.max(0, Number(fiado.pendingTokens || 0));
-    if (currentPendingTokens <= 0) return;
+    if (!currentPendingTokens) return;
 
-    const currentPendingValue = Math.max(0, currentPendingTokens * fichaPrice);
-    const rawTokenValuePaid = settleAll ? currentPendingValue : Math.min(Number(paymentValue || 0), currentPendingValue);
-    let paidTokens = settleAll ? currentPendingTokens : Math.floor(rawTokenValuePaid / fichaPrice);
+    const currentPendingValue = currentPendingTokens * fichaPrice;
+    const numericPaymentValue = Math.max(0, Number(paymentValue || 0));
+    const paidTokens = settleAll
+      ? currentPendingTokens
+      : Math.min(currentPendingTokens, Math.floor(numericPaymentValue / fichaPrice));
 
-    if (paidTokens <= 0 && rawTokenValuePaid > 0 && Number(paymentValue || 0) >= currentPendingValue) {
-      paidTokens = currentPendingTokens;
+    if (!paidTokens && numericPaymentValue >= currentPendingValue) {
+      return applyFiadoTokenPaymentToMesa(table, fiado, currentPendingValue, true);
     }
 
-    if (paidTokens <= 0) return;
+    if (!paidTokens) return;
 
     const paidValue = paidTokens * fichaPrice;
-    const isOverdueFiado = fiado.status === "Fiado vencido";
-    const next = {
-      ...current,
-      total: isOverdueFiado ? Number(current.total || 0) + paidTokens : Number(current.total || 0),
-      paid: Number(current.paid || 0) + paidTokens,
-      paidValue: Number(current.paidValue || (Number(current.paid || 0) * fichaPrice)) + paidValue,
-      overdueTokens: isOverdueFiado
-        ? Math.max(0, Number(current.overdueTokens || 0) - paidTokens)
-        : Number(current.overdueTokens || 0),
-      overdueValue: isOverdueFiado
-        ? Math.max(0, Number(current.overdueValue || 0) - paidValue)
-        : Number(current.overdueValue || 0),
-      overduePaidTokens: isOverdueFiado
-        ? Number(current.overduePaidTokens || 0) + paidTokens
-        : Number(current.overduePaidTokens || 0),
-      overduePaidValue: isOverdueFiado
-        ? Number(current.overduePaidValue || 0) + paidValue
-        : Number(current.overduePaidValue || 0),
-      open: false,
-    };
-
-    if (table === "Mesa 1") setMesa1(next);
-    else setMesa2(next);
-
-    await persistMesa(table, next);
-
+    const isOverdueFiado = String(fiado.status || "").trim() === "Fiado vencido";
     const nextPendingTokens = Math.max(0, currentPendingTokens - paidTokens);
-    const nextStatus = Number(fiado.pending || 0) - Number(paymentValue || 0) <= 0
-      ? "Quitado"
-      : fiado.status === "Fiado vencido"
-        ? "Fiado vencido"
-        : "Pendente";
+    const nextStatus =
+      Number(fiado.pending || 0) - numericPaymentValue <= 0 && nextPendingTokens <= 0
+        ? "Quitado"
+        : isOverdueFiado
+          ? "Fiado vencido"
+          : "Pendente";
+
+    const updatedFiados = fiados
+      .map((item) =>
+        item.id === fiado.id
+          ? {
+              ...item,
+              pendingTokens: nextPendingTokens,
+              status: nextStatus,
+              tableName: item.tableName || table,
+            }
+          : item
+      )
+      .filter((item) => item.status !== "Quitado");
+
+    const overdueStats = getMesaOverdueFiadoStats(table, updatedFiados);
+
+    const next = await saveMesaState(table, {
+      ...current,
+      paid: current.paid + paidTokens,
+      paidValue: current.paidValue + paidValue,
+      overdueTokens: overdueStats.tokens,
+      overdueValue: overdueStats.value,
+      overduePaidTokens: isOverdueFiado
+        ? current.overduePaidTokens + paidTokens
+        : current.overduePaidTokens,
+      overduePaidValue: isOverdueFiado
+        ? current.overduePaidValue + paidValue
+        : current.overduePaidValue,
+      open: Boolean(current.pending > 0),
+    });
+
+    await addMesaHistoryEntry({
+      mesa: table,
+      action: isOverdueFiado ? "Pagamento de fichas fiadas vencidas" : "Pagamento de fichas fiadas",
+      total: next.total,
+      paid: next.paid,
+      pending: next.pending,
+      tokenQuantity: paidTokens,
+      value: paidValue,
+      details: isOverdueFiado
+        ? `${paidTokens} ficha(s) vencida(s) paga(s) e lançada(s) em fichas fiadas vencidas pagas.`
+        : `${paidTokens} ficha(s) fiada(s) paga(s).`,
+    });
 
     await supabase
       .from("fiados")
@@ -2567,11 +2684,31 @@ async function getCurrentUserId() {
         status: nextStatus,
       })
       .eq("id", fiado.id);
+
+    setFiados(updatedFiados);
+
+    if (nextStatus === "Quitado") {
+      setFiadosQuitados((prev) => {
+        const alreadyExists = prev.some((item) => item.id === fiado.id);
+        if (alreadyExists) return prev;
+        return [
+          {
+            ...fiado,
+            status: "Quitado",
+            pendingTokens: 0,
+            total: Number(fiado.partialPaid || 0) + Number(fiado.pending || 0),
+            at: formatDateTime(),
+          },
+          ...prev,
+        ];
+      });
+    }
   }
 
   async function quitMesa(table) {
-    const state = table === "Mesa 1" ? mesa1 : mesa2;
-    if (!state.total && !state.pending && !state.paid && !state.unpaidTokens && !state.overdueTokens) {
+    const current = getMesaStateByName(table);
+
+    if (!mesaHasOperationalBalance(current) && !current.unpaidTokens && !current.overdueTokens) {
       notify(`${table} já está zerada.`, "info");
       return;
     }
@@ -2579,20 +2716,32 @@ async function getCurrentUserId() {
     openConfirm({
       type: "warn",
       title: `Quitar ${table}`,
-      message: state.pending > 0
-        ? `${table} vai encerrar as fichas pendentes sem pagamento. Essas fichas sairão de pendentes e entrarão em fichas não pagas.`
-        : `${table} não possui fichas pendentes no momento.`,
+      message:
+        current.pending > 0
+          ? `${table} vai encerrar as fichas pendentes sem pagamento. Essas fichas sairão de pendentes e entrarão em fichas não pagas.`
+          : `${table} não possui fichas pendentes no momento.`,
       requirePassword: true,
       onConfirm: async () => {
-        const pendingTokens = Number(state.pending || 0);
+        const pendingTokens = current.pending;
         const pendingValue = pendingTokens * fichaPrice;
+
+        const next = await saveMesaState(table, {
+          ...current,
+          pending: 0,
+          unpaidTokens: current.unpaidTokens + pendingTokens,
+          unpaidValue: current.unpaidValue + pendingValue,
+          open: false,
+        });
 
         await addMesaHistoryEntry({
           mesa: table,
-          action: pendingTokens > 0 ? "Quitação de pendências da mesa" : "Quitação da mesa sem pendências",
-          total: state.total,
-          paid: state.paid,
-          pending: pendingTokens,
+          action:
+            pendingTokens > 0
+              ? "Quitação de pendências da mesa"
+              : "Quitação da mesa sem pendências",
+          total: next.total,
+          paid: next.paid,
+          pending: next.pending,
           tokenQuantity: pendingTokens,
           value: pendingValue,
           details:
@@ -2601,21 +2750,11 @@ async function getCurrentUserId() {
               : "Mesa quitada sem fichas pendentes.",
         });
 
-        const next = {
-          ...state,
-          pending: 0,
-          unpaidTokens: Number(state.unpaidTokens || 0) + pendingTokens,
-          unpaidValue: Number(state.unpaidValue || 0) + pendingValue,
-          open: false,
-        };
-
-        if (table === "Mesa 1") setMesa1(next); else setMesa2(next);
-        await persistMesa(table, next);
         notify(`${table} quitada com sucesso.`, "success");
+        markMenuChanged(["sinuca", "dashboard"]);
       },
     });
   }
-
 
   function preserveCashSummarySnapshot() {
     const stored = readCashSummaryState();
@@ -2641,96 +2780,70 @@ async function getCurrentUserId() {
   }
 
   function closeMesa(table) {
-    const state = table === "Mesa 1" ? mesa1 : mesa2;
+    const current = getMesaStateByName(table);
     const linkedFiadoStats = getMesaLinkedFiadoStats(table);
 
-    if (!state.total && !state.pending && !state.paid && !state.unpaidTokens && !linkedFiadoStats.tokens && !state.overdueTokens) {
-      notify(`${table} não tem nada para pagar e já está pronta para novo uso.`, "info");
+    if (!mesaHasOperationalBalance(current) && !linkedFiadoStats.tokens) {
+      notify(`${table} não tem nada para fechar.`, "info");
       return;
     }
 
-    if (state.pending > 0) {
+    if (current.pending > 0) {
       if (linkedFiadoStats.tokens <= 0) {
-        notify(`${table} possui ${state.pending} ficha(s) pendente(s) e nenhuma delas foi lançada em fiado. Quite as fichas ou lance no fiado antes de fechar a mesa.`, "warn");
+        notify(`${table} possui ${current.pending} ficha(s) pendente(s) e nenhuma delas foi lançada em fiado. Quite as fichas ou lance no fiado antes de fechar a mesa.`, "warn");
         return;
       }
 
-      if (linkedFiadoStats.tokens < state.pending) {
-        notify(`${table} ainda tem ${state.pending - linkedFiadoStats.tokens} ficha(s) pendente(s) fora do fiado. Lance todas no fiado ou quite tudo antes de fechar a mesa.`, "warn");
+      if (linkedFiadoStats.tokens < current.pending) {
+        notify(`${table} ainda tem ${current.pending - linkedFiadoStats.tokens} ficha(s) pendente(s) fora do fiado. Lance todas no fiado ou quite tudo antes de fechar a mesa.`, "warn");
         return;
       }
-
-      openConfirm({
-        type: "warn",
-        title: `Fechar ${table} com pendência`,
-        message: `${table} possui ${state.pending} ficha(s) pendente(s), todas já vinculadas ao fiado. Ao fechar a mesa, essas fichas passarão para fiado vencido.`,
-        requirePassword: true,
-        onConfirm: async () => {
-          const cashSummarySnapshot = preserveCashSummarySnapshot();
-          const overdue = await markMesaFiadosAsOverdue(table);
-          await addMesaHistoryEntry({
-            mesa: table,
-            action: "Fechamento forçado",
-            total: state.total,
-            paid: state.paid,
-            pending: state.pending,
-            tokenQuantity: state.pending,
-            value: state.pending * fichaPrice,
-            details: `Mesa encerrada com fichas pendentes. Fiado vencido transferido: ${overdue.tokens} ficha(s).`,
-          });
-
-          const cleared = { ...defaultMesaState, overdueTokens: Number(state.overdueTokens || 0) + overdue.tokens, overdueValue: Number(state.overdueValue || 0) + overdue.value, paidValue: 0 };
-
-          if (table === "Mesa 1") {
-            setMesa1(cleared);
-            await persistMesa("Mesa 1", cleared);
-          } else {
-            setMesa2(cleared);
-            await persistMesa("Mesa 2", cleared);
-          }
-
-          restoreCashSummarySnapshot(cashSummarySnapshot);
-          notify(`${table} foi encerrada com fechamento forçado.`, "warn");
-          markMenuChanged(["sinuca", "dashboard"]);
-        },
-      });
-      return;
     }
 
     openConfirm({
-      type: "info",
-      title: `Fechar ${table}`,
-      message: `${table} será zerada e ficará pronta para novo uso.`,
+      type: current.pending > 0 ? "warn" : "info",
+      title: current.pending > 0 ? `Fechar ${table} com pendência` : `Fechar ${table}`,
+      message:
+        current.pending > 0
+          ? `${table} possui ${current.pending} ficha(s) pendente(s), todas já vinculadas ao fiado. Ao fechar a mesa, essas fichas passarão para fiado vencido.`
+          : `${table} será zerada e ficará pronta para novo uso.`,
       requirePassword: true,
       onConfirm: async () => {
         const cashSummarySnapshot = preserveCashSummarySnapshot();
-        const overdue = linkedFiadoStats.tokens > 0
-          ? await markMesaFiadosAsOverdue(table)
-          : { tokens: 0, value: 0 };
-        await addMesaHistoryEntry({
-          mesa: table,
-          action: "Fechamento normal",
-          total: state.total,
-          paid: state.paid,
-          pending: state.pending,
-          tokenQuantity: 0,
-          value: 0,
-          details: overdue.tokens > 0 ? `Mesa encerrada. Fiado vencido transferido: ${overdue.tokens} ficha(s).` : "Mesa encerrada sem pendências.",
+        const overdueTransfer =
+          current.pending > 0 ? await markMesaFiadosAsOverdue(table) : { tokens: 0, value: 0 };
+
+        await saveMesaState(table, {
+          ...defaultMesaState,
+          overdueTokens: 0,
+          overdueValue: 0,
+          overduePaidTokens: 0,
+          overduePaidValue: 0,
+          open: false,
         });
 
-        const cleared = { ...defaultMesaState, overdueTokens: Number(state.overdueTokens || 0) + overdue.tokens, overdueValue: Number(state.overdueValue || 0) + overdue.value, paidValue: 0 };
-
-        if (table === "Mesa 1") {
-          setMesa1(cleared);
-          await persistMesa("Mesa 1", cleared);
-        } else {
-          setMesa2(cleared);
-          await persistMesa("Mesa 2", cleared);
-        }
+        await addMesaHistoryEntry({
+          mesa: table,
+          action: current.pending > 0 ? "Fechamento com fiado vencido" : "Fechamento normal",
+          total: current.total,
+          paid: current.paid,
+          pending: current.pending,
+          tokenQuantity: current.pending,
+          value: current.pending * fichaPrice,
+          details:
+            current.pending > 0
+              ? `Mesa fechada. ${overdueTransfer.tokens} ficha(s) pendente(s) foi(ram) transferida(s) para fiado vencido. Todos os campos da mesa foram zerados.`
+              : "Mesa fechada e zerada sem pendências.",
+        });
 
         restoreCashSummarySnapshot(cashSummarySnapshot);
-        notify(`${table} zerada com sucesso.`, "success");
-        markMenuChanged(["sinuca", "dashboard"]);
+        notify(
+          current.pending > 0
+            ? `${table} fechada, zerada e com fichas pendentes enviadas para fiado vencido.`
+            : `${table} zerada com sucesso.`,
+          current.pending > 0 ? "warn" : "success"
+        );
+        markMenuChanged(["sinuca", "dashboard", "fiados"]);
       },
     });
   }
@@ -2748,11 +2861,18 @@ async function getCurrentUserId() {
 
     const nextPending = Math.max(0, Number(fiado.pending || 0) - value);
     const nextPartialPaid = Number(fiado.partialPaid || 0) + value;
-    const nextStatus = nextPending === 0 ? "Quitado" : fiado.status === "Fiado vencido" ? "Fiado vencido" : "Pendente";
-    const currentPendingTokens = Math.max(0, Number(fiado.pendingTokens || 0));
-    const tokenValuePaid = Math.min(value, currentPendingTokens * fichaPrice);
-    const paidTokens = nextPending === 0 ? currentPendingTokens : Math.min(currentPendingTokens, Math.floor(tokenValuePaid / fichaPrice));
-    const nextPendingTokens = Math.max(0, currentPendingTokens - paidTokens);
+    const paidTokens = Math.min(
+      Math.max(0, Number(fiado.pendingTokens || 0)),
+      Math.floor(value / fichaPrice)
+    );
+    const nextPendingTokens = Math.max(0, Number(fiado.pendingTokens || 0) - paidTokens);
+    const nextStatus =
+      nextPending === 0 && nextPendingTokens === 0
+        ? "Quitado"
+        : String(fiado.status || "").trim() === "Fiado vencido"
+          ? "Fiado vencido"
+          : "Pendente";
+
     const userId = await getCurrentUserId();
 
     const { error } = await supabase
@@ -2788,13 +2908,13 @@ async function getCurrentUserId() {
     });
 
     if (fiado.tableName && paidTokens > 0) {
-      await applyFiadoTokenPaymentToMesa(fiado.tableName, fiado, value, nextPending === 0);
+      await applyFiadoTokenPaymentToMesa(fiado.tableName, fiado, value, nextPending === 0 && nextPendingTokens === 0);
     }
 
     setPartialInputs((prev) => ({ ...prev, [fiadoId]: "" }));
     await loadPersistedData();
     notify("Pagamento parcial registrado.", "success");
-    markMenuChanged(["fiados", "dashboard", "caixa"]);
+    markMenuChanged(["fiados", "dashboard", "caixa", "sinuca"]);
   }
 
   function settleFiado(fiado) {
@@ -2845,7 +2965,7 @@ async function getCurrentUserId() {
 
         await loadPersistedData();
         notify(`Fiado de ${fiadoDisplayName(fiado)} quitado com sucesso.`, "success");
-        markMenuChanged(["fiados", "dashboard", "caixa"]);
+        markMenuChanged(["fiados", "dashboard", "caixa", "sinuca"]);
       },
     });
   }
@@ -4679,20 +4799,17 @@ async function getCurrentUserId() {
         )}
 
         {activePage === "relatorios" && (
-          <Section title="Relatórios" subtitle="Bebidas que mais saem e alertas de estoque baixo.">
+          <Section title="Relatórios" subtitle="Valor em estoque e alertas de estoque baixo.">
             <div className="grid gap-4 lg:grid-cols-2">
               <div className="rounded-2xl bg-slate-50 p-4 ring-1 ring-slate-200">
                 <div className="mb-3 flex items-center gap-2 text-slate-800">
-                  <BarChart3 size={18} />
-                  <p className="font-semibold">Bebidas mais vendidas</p>
+                  <Package size={18} />
+                  <p className="font-semibold">Valor em estoque</p>
                 </div>
-                <div className="space-y-2">
-                  {topBeverages.map((item) => (
-                    <div key={item.id} className="flex items-center justify-between rounded-2xl bg-white px-4 py-3 ring-1 ring-slate-200 text-sm">
-                      <span>{item.name}</span>
-                      <strong>{item.sold} saídas</strong>
-                    </div>
-                  ))}
+                <div className="rounded-2xl bg-white px-4 py-4 ring-1 ring-slate-200">
+                  <p className="text-sm text-slate-500">Estimativa de valor de estoques</p>
+                  <p className="mt-2 text-2xl font-bold text-slate-900">{currency(estimatedInventoryValue)}</p>
+                  <p className="mt-1 text-xs text-slate-500">Baseado na soma de preço × estoque dos produtos cadastrados.</p>
                 </div>
               </div>
 
@@ -4702,12 +4819,18 @@ async function getCurrentUserId() {
                   <p className="font-semibold">Estoque baixo</p>
                 </div>
                 <div className="space-y-2">
-                  {lowStockProducts.map((item) => (
-                    <div key={item.id} className="flex items-center justify-between rounded-2xl bg-white px-4 py-3 ring-1 ring-slate-200 text-sm">
-                      <span>{item.name}</span>
-                      <strong>{item.stock} un.</strong>
+                  {lowStockProducts.length === 0 ? (
+                    <div className="rounded-2xl bg-white px-4 py-3 text-sm text-slate-500 ring-1 ring-slate-200">
+                      Nenhum produto com estoque baixo.
                     </div>
-                  ))}
+                  ) : (
+                    lowStockProducts.map((item) => (
+                      <div key={item.id} className="flex items-center justify-between rounded-2xl bg-white px-4 py-3 ring-1 ring-slate-200 text-sm">
+                        <span>{item.name}</span>
+                        <strong>{item.stock} un.</strong>
+                      </div>
+                    ))
+                  )}
                 </div>
               </div>
             </div>
