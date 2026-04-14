@@ -691,7 +691,9 @@ export default function App() {
         .normalize("NFD")
         .replace(/[̀-ͯ]/g, "");
 
-      if (entryType === "loan-payment") return "Empréstimo";
+      if (entryType === "loan") return "Empréstimo";
+      if (entryType === "loan-payment") return null;
+      if (entryType === "withdrawal") return null;
 
       if (
         [
@@ -727,7 +729,7 @@ export default function App() {
       if (value <= 0) return;
 
       const label = normalizePaymentMethod(entry.method, entry.entryType);
-      if (!allowedLabels.includes(label)) return;
+      if (!label || !allowedLabels.includes(label)) return;
 
       map.set(label, (map.get(label) || 0) + value);
     });
